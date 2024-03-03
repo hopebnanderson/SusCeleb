@@ -1,0 +1,2338 @@
+---
+title: "Thesis_Celebensis_Analysis"
+author: "Hope Anderson"
+date: "`r Sys.Date()`"
+output:
+   html_document:
+     toc: yes
+     toc_float: yes
+     number_section: no
+     df_print: paged
+     dev: png
+   pdf_document:
+     toc: yes
+     number_section: yes
+     keep_tex: yes
+     highlight: "tango"
+     df_print: kable
+     dev: png
+---
+<style type="text/css">
+
+body{ /* Normal  */
+       font-size: 12px;
+   }
+td {  /* Table  */
+   font-size: 14px;
+}
+h1.title {
+   font-size: 38px;
+   color: DarkRed;
+}
+h1 { /* Header 1 */
+   font-size: 28px;
+   color: DarkBlue;
+}
+h2 { /* Header 2 */
+     font-size: 22px;
+   color: DarkBlue;
+}
+h3 { /* Header 3 */
+   font-size: 18px;
+   font-family: "Times New Roman", Times, serif;
+   color: DarkBlue;}
+h4 { /* Header 4 */
+   font-size: 16px;
+   font-family: "Times New Roman", Times, serif;
+   color: Blue;
+}
+code.r{ /* Code block */
+     font-size: 12px;
+}
+pre { /* Code block - determines code spacing between lines */
+     font-size: 14px;
+}
+</style>
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+library(tidyverse)
+library(ggplot2)
+library(ggrepel)
+library(viridis)
+library(ggpubr)
+library(umx)
+library(reshape2)
+library(sf)
+library(rworldmap)
+library(rnaturalearth)
+```
+
+# Data
+
+## Variant Calling
+
+We start from the bam files, after the pipeline has finished running. They have already been indexed, de-duped, and have read groups. To speed up the variant calling process, we'll chop the entire genome into intervals that will run parallelly. 
+```{bash, eval=FALSE}
+#make intervals list
+conda activate Bedtools 
+bedtools makewindows -g Sus_scrofa.Sscrofa11.1.dna.toplevel.fa.fai -w 5000000 | grep -v -e ^[A-Z] | awk '{print $1":"$2+1"-"$3}' > panel_intervals.txt
+```
+
+Copying relevant bams.
+```{bash, eval = FALSE, include=FALSE}
+#Bams.To.Download.txt
+/dss/dssfs02/pn29qe/pn29qe-dss-0000/Wallacea_modern/suidsToSus_bam/SAMEA6141239_mdup.bam
+/dss/dssfs02/pn29qe/pn29qe-dss-0000/Wallacea_modern/suidsToSus_bam/SAMEA6141240_mdup.bam
+/dss/dssfs02/pn29qe/pn29qe-dss-0000/Wallacea_modern/suidsToSus_bam/SAMEA6141241_mdup.bam
+/dss/dssfs02/pn29qe/pn29qe-dss-0000/Wallacea_modern/suidsToSus_bam/SAMEA6141242_mdup.bam
+/dss/dssfs02/pn29qe/pn29qe-dss-0000/Wallacea_modern/suidsToSus_bam/SAMEA6141245_mdup.bam
+/dss/dssfs02/pn29qe/pn29qe-dss-0000/Wallacea_modern/suidsToSus_bam/SAMEA6141246_mdup.bam
+/dss/dssfs02/pn29qe/pn29qe-dss-0000/Wallacea_modern/suidsToSus_bam/ERR173176_merged_mdup.bam
+/dss/dssfs02/pn29qe/pn29qe-dss-0000/Wallacea_modern/suidsToSus_bam/ERR173178_merged_mdup.bam
+/dss/dssfs02/pn29qe/pn29qe-dss-0000/Wallacea_modern/suidsToSus_bam/SAMEA6141243_mdup.bam
+```
+
+```{bash, eval=FALSE, include=FALSE}
+#header
+
+#!/bin/bash
+#SBATCH --cpus-per-task=28
+#SBATCH --time=72:00:00
+#SBATCH --job-name=bams
+#SBATCH --mail-type=ALL
+#SBATCH --mail-user=Hope.Anderson@lmu.de
+#SBATCH --clusters=biohpc_gen
+#SBATCH --partition=biohpc_gen_production
+
+module load slurm_setup
+eval "$(conda shell.bash hook)"
+```
+
+```{bash, eval=FALSE}
+#download_bams.sh
+conda activate Samtools
+while read -r line
+do
+   rsync -r $(echo "$line"*) .
+done<Bams.To.Download.txt
+```
+
+We have all of our indexed bams in the same folder. This includes: 11 *Sus celebensis* we deep sequenced, and from published reference sequences: 3 additional *Sus celebensis*, 5 *Sus scrofa*, 1 warthog (outgroup), and 2 each of *Sus barbatus* , *Sus cebifrons*, and *Sus verrucosus*, for a total of 26 individuals.
+
+Let's start the variant calling. The script is submitted to the scheduler, and runs in parallel on chunks of the genome that are 5,000,000 bp long. 
+
+To speed up the process even more, we'll launch 10 different jobs for different chromosomes.
+```{bash, eval=FALSE}
+#separate the interval list
+cat panel_intervals.txt | grep '1:' > panel_intervals_ONE.txt
+cat panel_intervals.txt | grep '2:' > panel_intervals_TWO.txt
+cat panel_intervals.txt | grep '3:' > panel_intervals_THREE.txt
+cat panel_intervals.txt | grep '4:' > panel_intervals_FOUR.txt
+cat panel_intervals.txt | grep '5:' > panel_intervals_FIVE.txt
+cat panel_intervals.txt | grep '6:' > panel_intervals_SIX.txt
+cat panel_intervals.txt | grep '7:' > panel_intervals_SEVEN.txt
+cat panel_intervals.txt | grep '8:' > panel_intervals_EIGHT.txt
+cat panel_intervals.txt | grep '9:' > panel_intervals_NINE.txt
+cat panel_intervals.txt | grep '0:' > panel_intervals_TEN.txt
+```
+
+Check that we have includes all of the intervals in our sub lists, and then create a list of lists... 
+```{bash, eval=FALSE}
+cat panel_intervals_* | wc -l
+cat panel_intervals.txt | wc -l
+ls panel_intervals_* > list_10_panel_lists
+```
+
+The inside script provides the actually variant calling command (using Freebayes) with a variable in the place of the region. These VCFs are redirected to a temporary directory. 
+```{bash, eval=FALSE}
+#freebayes_inside.sh
+freebayes -f Sus_scrofa.Sscrofa11.1.dna.toplevel.fa -q 30 -m 20 -C 5 -r $1 -L bam_list.txt > panel_temp/panel."$1".vcf
+```
+
+```{bash, eval=FALSE,include=FALSE}
+#header
+
+#!/bin/bash
+#SBATCH --ntasks-per-node=4
+#SBATCH --cpus-per-task=7
+#SBATCH --time=72:00:00
+#SBATCH --job-name=variant_calling
+#SBATCH --mail-type=ALL
+#SBATCH --mail-user=Hope.Anderson@lmu.de
+#SBATCH --clusters=biohpc_gen
+#SBATCH --partition=biohpc_gen_production
+
+module load slurm_setup
+eval "$(conda shell.bash hook)"
+conda activate FreeBayes
+```
+
+The outside script provides the parallellization, using a list of regions we created earlier from the reference genome. The variable is the chromosome segments list, of which we have 10.
+```{bash, eval=FALSE}
+#freebayes_outside.sh
+cat $1 | xargs -L 1 -P 4 ./freebayes_inside.sh
+```
+
+Now, we write a simple script to launch all 10 sbatch scripts at once.
+```{bash, eval=FALSE}
+#freebayes_launch.sh
+while read -r line
+do 
+  sbatch freebayes_outside.sh $line
+done<list_10_panel_lists
+```
+
+All of our panels have finished assembling. However, we need to concatenate them into one VCF. First, that means compressing and tab indexing the panel vcfs.
+```{bash, eval=FALSE}
+ls *.vcf > vcf_list.txt
+```
+
+```{bash, eval=FALSE,include=FALSE}
+#header
+
+#!/bin/bash
+#SBATCH --ntasks-per-node=1
+#SBATCH --cpus-per-task=28
+#SBATCH --time=72:00:00
+#SBATCH --job-name=tabix
+#SBATCH --mail-type=ALL
+#SBATCH --mail-user=Hope.Anderson@lmu.de
+#SBATCH --clusters=biohpc_gen
+#SBATCH --partition=biohpc_gen_production
+
+module load slurm_setup
+eval "$(conda shell.bash hook)"
+```
+
+```{bash, eval=FALSE}
+#zip_tab.sh
+conda activate Samtools
+while read -r line 
+do
+  bgzip "$line"
+  tabix "$line".gz
+done<vcf_list.txt
+
+ls *vcf.gz > vcf_list_GZ.txt
+```
+
+Now, we concatenate the vcfs together into a giant vcf.
+
+```{bash,eval=FALSE,include=FALSE}
+#header
+
+#!/bin/bash
+#SBATCH --ntasks-per-node=1
+#SBATCH --cpus-per-task=28
+#SBATCH --time=72:00:00
+#SBATCH --job-name=concat
+#SBATCH --mail-type=ALL
+#SBATCH --mail-user=Hope.Anderson@lmu.de
+#SBATCH --clusters=biohpc_gen
+#SBATCH --partition=biohpc_gen_production
+
+module load slurm_setup
+eval "$(conda shell.bash hook)"
+```
+
+```{bash, eval=FALSE}
+#concat.sh
+conda activate BCFTools
+bcftools concat -a -f vcf_list_GZ.txt -Oz > ../global.vcf.gz
+```
+
+Three of the individuals were duplicated in the variant calling stage, because of a mix up between the library and sample names in the read group lines. Instead of fixing the error from the source and rerunning the variant callings, we identified which of the two libraries was screening data by looking at missingness, and then remove the individuals created from the screening libraries.
+
+```{bash, eval=FALSE, include=FALSE}
+#individuals_keep.txt
+333
+5_3
+55K
+AL456
+AL460
+AL523
+ERR173176.1
+ERR173178.1
+ERR173210.1
+GL1218
+GL1221
+GL1240
+GL596
+RB501
+SAMEA6141235
+SAMEA6141239
+SAMEA6141240
+SAMEA6141241
+SAMEA6141242
+SAMEA6141243
+SAMEA6141244
+SAMEA6141245
+SAMEA6141246
+WB20U02Japan_SAMEA3497823
+WB29U14WBSChina_SAMEA3497818
+WB31F05WBGreece_SAMEA3497880
+```
+
+```{bash, eval=FALSE, include=FALSE}
+#header
+
+#!/bin/bash
+#SBATCH --ntasks-per-node=1
+#SBATCH --cpus-per-task=28
+#SBATCH --time=72:00:00
+#SBATCH --job-name=exlude_dupe_ind
+#SBATCH --mail-type=ALL
+#SBATCH --mail-user=Hope.Anderson@lmu.de
+#SBATCH --clusters=biohpc_gen
+#SBATCH --partition=biohpc_gen_production
+
+module load slurm_setup
+eval "$(conda shell.bash hook)"
+```
+
+```{bash, eval=FALSE}
+#exclude_dupe_ind.sh
+conda activate BCFTools
+bcftools view -S individuals_keep.txt global.vcf.gz -Oz > globalExluDupInd.vcf.gz
+```
+
+## Filtering 
+
+### Missingness
+
+#### Filter
+
+The VCF is done. We start with 82,797,639 variants. That's a lot!!
+
+We'll test out some filtering on step at a time. Let's just see how many variants we're left with if we remove all the missing data. 
+
+```{bash, eval=FALSE,include=FALSE}
+#header
+
+#!/bin/bash
+#SBATCH --ntasks-per-node=1
+#SBATCH --cpus-per-task=28
+#SBATCH --time=72:00:00
+#SBATCH --job-name=plink_no_missing
+#SBATCH --mail-type=ALL
+#SBATCH --mail-user=Hope.Anderson@lmu.de
+#SBATCH --clusters=biohpc_gen
+#SBATCH --partition=biohpc_gen_production
+
+module load slurm_setup
+eval "$(conda shell.bash hook)"
+```
+
+```{bash, eval=FALSE}
+#plink_no_missing.sh
+conda activate plenv
+
+#Create the plink fileset, setting the allowed missingness to 0.
+plink --vcf ../globalExluDupInd.vcf.gz --geno 0 --make-bed --out globalExluDupInd_Miss0
+```
+
+We see that only including sites with no missing data, we are left with 1,167,458 variants. Not so bad. **However, it's likely that a lot of these variants come from differences between our individuals of interest and the outgroup(s).** 
+
+Therefore, Let's see how many variants we have at sites with no missing data *if we exclude the warthog and the two *cebrifrons. 
+
+```{bash,eval=FALSE,include=FALSE}
+#outgroup_exclude.txt
+SAMEA6141241
+SAMEA6141242
+SAMEA6141235
+```
+
+```{bash,eval=FALSE,include=FALSE}
+#header
+
+#!/bin/bash
+#SBATCH --ntasks-per-node=1
+#SBATCH --cpus-per-task=28
+#SBATCH --time=72:00:00
+#SBATCH --job-name=no_missing_NOG
+#SBATCH --mail-type=ALL
+#SBATCH --mail-user=Hope.Anderson@lmu.de
+#SBATCH --clusters=biohpc_gen
+#SBATCH --partition=biohpc_gen_production
+
+module load slurm_setup
+eval "$(conda shell.bash hook)"
+```
+
+Now, we filter in plink from the same VCF, allowing no missing data AND excluding the outgroup individuals. The minor allele frequency is set to low enough to only eliminate monomorphic sites. We do each of these steps individually to make sure they are done in the correct order. The removal of individuals is done at the VCF stage.
+
+```{bash,eval=FALSE}
+#NM_NOG.sh
+
+#remove outgroups
+conda activate BCFTools
+bcftools view -S ^outgroup_exclude.txt ../globalExluDupInd.vcf.gz -Oz > globalExluDupInd_NOG.vcf.gz
+
+#remove monomorphic sites 
+conda activate plenv
+plink --vcf globalExluDupInd_NOG.vcf.gz --maf .001 --make-bed --out globalExluDupInd_NOG_NoMono
+
+#remove sites with missing data
+plink --bfile globalExluDupInd_NOG_NoMono --geno 0 --make-bed --out globalExluDupInd_NOG_NoMono_NoMiss
+```
+
+That leave 809,586 sites. Finally, let's look at how many variants remain within only *Celebensis*.
+
+```{bash, eval=FALSE, include=FALSE}
+#celebensis_include.txt
+333
+5_3
+55K
+AL456
+AL460
+AL523
+SAMEA6141243
+SAMEA6141244
+ERR173210.1
+GL1218
+GL1221
+GL1240
+GL596
+RB501
+```
+
+```{bash, eval=FALSE, include=FALSE}
+#header
+
+#!/bin/bash
+#SBATCH --ntasks-per-node=1
+#SBATCH --cpus-per-task=28
+#SBATCH --time=72:00:00
+#SBATCH --job-name=OnlyCel_NM_NOG
+#SBATCH --mail-type=ALL
+#SBATCH --mail-user=Hope.Anderson@lmu.de
+#SBATCH --clusters=biohpc_gen
+#SBATCH --partition=biohpc_gen_production
+
+module load slurm_setup
+eval "$(conda shell.bash hook)"
+```
+
+```{bash, eval=FALSE}
+#OnlyCel_NM_NOG.sh
+
+#only include cel
+conda activate BCFTools
+bcftools view -S celebensis_include.txt globalExluDupInd_NOG.vcf.gz -Oz > OnlyCel_NOG.vcf.gz
+
+#remove monomorphic sites 
+conda activate plenv
+plink --vcf OnlyCel_NOG.vcf.gz --maf .001 --make-bed --out OnlyCel_NOG_NoMono
+
+#remove sites with missing data
+plink --bfile OnlyCel_NOG_NoMono --geno 0 --make-bed --out OnlyCel_NOG_NoMono_NoMiss
+```
+
+We are left with 542,270 variants. We're shooting for at least 100,000, so this is fine. Now that we know we have enough variation, let's make a PCA all the data. We'll actually make two PCAs -- one with projection, and one without. The projection PCA will use two individuals from each species to make the axes, and the rest of the individuals will be projected.
+
+But before that, one more step of filtering. We need to create a fileset with every individual **except the warthog**, since creating the PCA with an outgroup will obscure the variation we're looking for.
+
+```{bash, eval=FALSE,include=FALSE}
+#warthog_exclude.txt
+SAMEA6141235
+```
+
+```{bash, eval=FALSE,include=FALSE}
+#header
+
+#!/bin/bash
+#SBATCH --ntasks-per-node=1
+#SBATCH --cpus-per-task=28
+#SBATCH --time=72:00:00
+#SBATCH --job-name=Warthog_exclude
+#SBATCH --mail-type=ALL
+#SBATCH --mail-user=Hope.Anderson@lmu.de
+#SBATCH --clusters=biohpc_gen
+#SBATCH --partition=biohpc_gen_production
+
+module load slurm_setup
+eval "$(conda shell.bash hook)"
+```
+
+```{bash, eval=FALSE}
+#warthog_exclude.sh
+
+#exclude warthog 
+conda activate BCFTools
+bcftools view -S ^warthog_exclude.txt ../globalExluDupInd.vcf.gz -Oz > no_warthog.vcf.gz
+
+#remove monomorphic sites 
+conda activate plenv
+plink --vcf no_warthog.vcf.gz --maf .001 --make-bed --out no_warthog.NoMono
+
+#remove sites with missing data
+plink --bfile no_warthog.NoMono --geno 0 --make-bed --out no_warthog.NoMono.NoMiss
+```
+
+We'll use smartPCA, which means we have to convert our fileset to Eigenstrat format.
+
+First, we have to recode the plink files to make the map.
+```{bash, eval=FALSE}
+plink --bfile no_warthog.NoMono.NoMiss --recode --out no_warthog.NoMono.NoMiss
+```
+
+Now, we have to manually fix the map file, which was messed up during the conversion from VCF (known bug in PLINK).
+```{bash, eval=FALSE}
+cat no_warthog.NoMono.NoMiss.map | awk 'BEGIN {OFS="\t"};{print $1,$1"_"$4,$3,$4}' > new_no_warthog.NoMono.NoMiss.map
+rm no_warthog.NoMono.NoMiss.map
+mv new_no_warthog.NoMono.NoMiss.map no_warthog.NoMono.NoMiss.map
+```
+
+Now we do the conversion to Eigenstrat format. The eigenstrat conversion requires a par file in the following format:
+```{bash, eval=FALSE}
+#no_warthog.NoMono.NoMiss.par.PED.EIGENSTRAT
+genotypename:    no_warthog.NoMono.NoMiss.ped
+snpname:         no_warthog.NoMono.NoMiss.map
+indivname:       no_warthog.NoMono.NoMiss.ped
+outputformat:    EIGENSTRAT
+genotypeoutname: no_warthog.NoMono.NoMiss.geno
+snpoutname:      no_warthog.NoMono.NoMiss.snp
+indivoutname:    no_warthog.NoMono.NoMiss.ind
+familynames:     NO
+```
+
+```{bash, eval=FALSE}
+#run the conversion
+conda activate Eigensoft 
+convertf -p no_warthog.NoMono.NoMiss.par.PED.EIGENSTRAT
+```
+
+Like we did with the map, we also need to modify the ind file slightly.
+```{bash, eval=FALSE}
+cat no_warthog.NoMono.NoMiss.ind | awk 'BEGIN {OFS="\t"};{print $1,"U",$1}' > no_warthog.NoMono.NoMiss.ind_new
+rm no_warthog.NoMono.NoMiss.ind
+mv no_warthog.NoMono.NoMiss.ind_new no_warthog.NoMono.NoMiss.ind
+```
+
+#### PCA
+
+Now we make the smartPCA. We'll start with the projected PCA. The poplistname variable includes the list of individuals from which to calculate the axes of the PCA. We choose two individuals from each species, with three *sus Scrofa* (one from each region) and four *sus Celebensis* (two published, and two of our samples.)
+
+```{bash, eval=FALSE}
+#no_warthog_to.calc.txt
+SAMEA6141239 #barbatus
+SAMEA6141240 #barbatus
+SAMEA6141241 #cebrifrons
+SAMEA6141242 #cebrifrons
+SAMEA6141245 #verrucosus
+SAMEA6141246 #verrucosus
+ERR173176.1 #scrofa Sumatra
+SAMEA3497880 #scrofa Greece 
+SAMEA3497823 #scrofa Japan
+SAMEA6141243 #celebensis zoo
+ERR173210.1 #celebensis 
+GL1240 #celebensis central 
+GL1218 #celebensis North 
+```
+
+Start with the parameter file.
+```{bash, eval=FALSE}
+#Smart_PCA_Proj.param
+genotypename: no_warthog.NoMono.NoMiss.geno
+snpname: no_warthog.NoMono.NoMiss.snp
+indivname: no_warthog.NoMono.NoMiss.ind
+evecoutname: no_warthog.NoMono.NoMissPROJ.evec
+evaloutname: no_warthog.NoMono.NoMissPROJ.eval
+poplistname: no_warthog_to.calc.txt
+lsqproject: YES
+numoutevec: 13
+numthreads: 1
+```
+
+Now, calculate the PCA.
+```{bash, eval=FALSE}
+#make the global PCA with projection
+conda activate Eigensoft
+smartpca -p Smart_PCA_Proj.param > Smart_PCA_Proj.log
+```
+
+We now follow the same steps for the PCA WITHOUT projection.
+```{bash, eval=FALSE}
+#Smart_PCA_NOProj.param
+genotypename: no_warthog.NoMono.NoMiss.geno
+snpname: no_warthog.NoMono.NoMiss.snp
+indivname: no_warthog.NoMono.NoMiss.ind
+evecoutname: no_warthog.NoMono.NoMissNOPROJ.evec
+evaloutname: no_warthog.NoMono.NoMissNOPROJ.eval
+numoutevec: 13
+numthreads: 1
+```
+
+```{bash, eval=FALSE}
+#make the global PCA withOUT projection
+conda activate Eigensoft
+smartpca -p Smart_PCA_NOProj.param > Smart_PCA_NOProj.log
+```
+
+#### Graph
+
+Now, let's graph both PCAs. We start by importing our data. We also need to metadata table.
+```{r}
+#metadata
+global_metadata <- read.csv("Global_metadata.csv", header=TRUE)
+
+#global PCA projected
+no_warthog.NoMono.NoMissPROJ.eval <- read.table("no_warthog.NoMono.NoMissPROJ.eval",header=FALSE) 
+no_warthog.NoMono.NoMissPROJ.eval1<- round(
+  no_warthog.NoMono.NoMissPROJ.eval[1,1]/sum(
+    no_warthog.NoMono.NoMissPROJ.eval)*100,digits=2)
+no_warthog.NoMono.NoMissPROJ.eval2 <- round(
+  no_warthog.NoMono.NoMissPROJ.eval[2,1]/sum(
+    no_warthog.NoMono.NoMissPROJ.eval)*100,digits=2)
+
+no_warthog.NoMono.NoMissPROJ.evec <- read.table("no_warthog.NoMono.NoMissPROJ.evec") %>% rename("ID" = "V1","PC1" = "V2","PC2" = "V3") %>% select (ID,PC1,PC2) %>%  inner_join(global_metadata, by="ID")
+
+#global PCA NOT projected 
+no_warthog.NoMono.NoMissNOPROJ.eval <- read.table("no_warthog.NoMono.NoMissNOPROJ.eval",header=FALSE)
+no_warthog.NoMono.NoMissNOPROJ.eval1<- round(
+  no_warthog.NoMono.NoMissNOPROJ.eval[1,1]/sum(
+    no_warthog.NoMono.NoMissNOPROJ.eval)*100,digits=2)
+no_warthog.NoMono.NoMissNOPROJ.eval2 <- round(
+  no_warthog.NoMono.NoMissNOPROJ.eval[2,1]/sum(
+    no_warthog.NoMono.NoMissNOPROJ.eval)*100,digits=2)
+
+no_warthog.NoMono.NoMissNOPROJ.evec <- read.table("no_warthog.NoMono.NoMissNOPROJ.evec") %>% rename("ID" = "V1","PC1" = "V2","PC2" = "V3") %>% select (ID,PC1,PC2) %>%  inner_join(global_metadata, by="ID")
+```
+
+```{r}
+ggplot(data=no_warthog.NoMono.NoMissPROJ.evec,aes(x=PC1,y=PC2,color=Name,shape=Age))+
+  geom_point(size=4)+
+  theme_classic()+
+  labs(title="Full Genome -- 706,760 variants. No missing data, projection.", 
+       color = "Name",
+       x=paste("PC1 ",no_warthog.NoMono.NoMissPROJ.eval1, "%"),
+       y=paste("PC2 ",no_warthog.NoMono.NoMissPROJ.eval2, "%"))
+```
+
+```{r}
+ggplot(data=no_warthog.NoMono.NoMissNOPROJ.evec,aes(x=PC1,y=PC2,color=Name,shape=Age))+
+  geom_point(size=4)+
+  theme_classic()+
+  labs(title="Full Genome -- 847,883 variants. No missing data, NO projection.", 
+       color = "Name",
+       x=paste("PC1 ",no_warthog.NoMono.NoMissNOPROJ.eval1, "%"),
+       y=paste("PC2 ",no_warthog.NoMono.NoMissNOPROJ.eval2, "%"))
+```
+
+### Note
+
+*To note -- the filtering of the individuals probably doesn't have to be done in the VCF stage, it can also be done in PLINK. But, don't forget to remove monomorphic sites using minor allele frequency!!*
+
+If you filter with plink, the file of individuals to keep/remove must be presented as a list with two columns, one for the individual names and one for the family names. In our case, these are the same. To format the list correctly, the following code can be used. 
+
+```{bash, eval=FALSE}
+while read -r line
+  do
+  echo $line | awk '{print $0,$NF}' >> fam_outgroup_exclude.txt
+done<outgroup_exclude.txt
+```
+
+### Minor allele frequency and linkage disequalibrium 
+
+#### Filter 
+
+Now, let's try a different type of filtering to and see what it looks like. We'll filter out all heterozygous sites, and also filter for linkage disequilibrium.
+```{bash, eval=FALSE}
+plink --bfile ../NoMissingFilter1/no_warthog.NoMono.NoMiss --make-bed --maf 0.03 --out no_warthog.NoMono.NoMiss.NoHet
+plink --bfile no_warthog.NoMono.NoMiss.NoHet --recode --out no_warthog.NoMono.NoMiss.NoHet
+```
+
+
+Fix the map
+```{bash, eval=FALSE}
+cat no_warthog.NoMono.NoMiss.NoHet.map | awk 'BEGIN {OFS="\t"};{print $1,$1"_"$4,$3,$4}' > new_no_warthog.NoMono.NoMiss.NoHet.map
+rm no_warthog.NoMono.NoMiss.NoHet.map
+mv new_no_warthog.NoMono.NoMiss.NoHet.map no_warthog.NoMono.NoMiss.NoHet.map
+```
+
+After filtering out heterozygous sites, we are left with 681,211 variants. Now, let's filter for linkage disequilibrium.
+
+```{bash,eval=FALSE}
+plink --file no_warthog.NoMono.NoMiss.NoHet --indep-pairwise 20 10 0.5 --recode --out no_warthog.NoMono.NoMiss.NoHet_LD
+plink --file no_warthog.NoMono.NoMiss.NoHet --out no_warthog.NoMono.NoMiss.NoHet_LD0.5 --exclude no_warthog.NoMono.NoMiss.NoHet_LD.prune.out --make-bed --recode
+```
+
+This leaves 388,771 sites. Let's again make 2 PCAs and see what our filtering looks like.
+
+First, start with the eigenstrat conversion.
+
+```{bash,eval=FALSE}
+#no_warthog.NoMono.NoMiss.NoHet_LD0.5.par.PED.EIGENSTRAT
+genotypename:    no_warthog.NoMono.NoMiss.NoHet_LD0.5.ped
+snpname:         no_warthog.NoMono.NoMiss.NoHet_LD0.5.map
+indivname:       no_warthog.NoMono.NoMiss.NoHet_LD0.5.ped
+outputformat:    EIGENSTRAT
+genotypeoutname: no_warthog.NoMono.NoMiss.NoHet_LD0.5.geno
+snpoutname:      no_warthog.NoMono.NoMiss.NoHet_LD0.5.snp
+indivoutname:    no_warthog.NoMono.NoMiss.NoHet_LD0.5.ind
+familynames:     NO
+```
+
+```{bash, eval=FALSE}
+conda activate Eigensoft
+convertf -p no_warthog.NoMono.NoMiss.NoHet_LD0.5.par.PED.EIGENSTRAT
+```
+
+Fix the ind file:
+
+```{bash,eval=FALSE}
+cat no_warthog.NoMono.NoMiss.NoHet_LD0.5.ind | awk 'BEGIN {OFS="\t"};{print $1,"U",$1}' > no_warthog.NoMono.NoMiss.NoHet_LD0.5.ind_new
+rm no_warthog.NoMono.NoMiss.NoHet_LD0.5.ind
+mv no_warthog.NoMono.NoMiss.NoHet_LD0.5.ind_new no_warthog.NoMono.NoMiss.NoHet_LD0.5.ind
+```
+
+#### PCA
+
+PCA with projection -- parameter file:
+```{bash,eval=FALSE}
+#Smart_PCA_Proj.param
+genotypename: no_warthog.NoMono.NoMiss.NoHet_LD0.5.geno
+snpname: no_warthog.NoMono.NoMiss.NoHet_LD0.5.snp
+indivname: no_warthog.NoMono.NoMiss.NoHet_LD0.5.ind
+evecoutname: no_warthog.NoMono.NoMiss.NoHet_LD0.5.PROJ.evec
+evaloutname: no_warthog.NoMono.NoMiss.NoHet_LD0.5.PROJ.eval
+poplistname: no_warthog_to.calc.txt
+lsqproject: YES
+numoutevec: 13
+numthreads: 1
+```
+
+Make the PCA:
+```{bash, eval=FALSE}
+conda activate Eigensoft
+smartpca -p Smart_PCA_Proj.param > Smart_PCA_Proj.log
+```
+
+PCA without projection -- parameter file:
+```{bash, eval=FALSE}
+#Smart_PCA_NO_Proj.param
+genotypename: no_warthog.NoMono.NoMiss.NoHet_LD0.5.geno
+snpname: no_warthog.NoMono.NoMiss.NoHet_LD0.5.snp
+indivname: no_warthog.NoMono.NoMiss.NoHet_LD0.5.ind
+evecoutname: no_warthog.NoMono.NoMiss.NoHet_LD0.5.NO.PROJ.evec
+evaloutname: no_warthog.NoMono.NoMiss.NoHet_LD0.5.NO.PROJ.eval
+numoutevec: 13
+numthreads: 1
+```
+
+Make the PCA:
+```{bash, eval=FALSE}
+conda activate Eigensoft
+smartpca -p Smart_PCA_NO_Proj.param > Smart_PCA_NO_Proj.log
+```
+
+#### Graph
+
+```{r}
+#PCA projected
+no_warthog.NoMono.NoMiss.NoHet_LD0.5.PROJ.eval <- read.table("no_warthog.NoMono.NoMiss.NoHet_LD0.5.PROJ.eval",header=FALSE) 
+no_warthog.NoMono.NoMiss.NoHet_LD0.5.PROJ.eval1<- round(
+  no_warthog.NoMono.NoMiss.NoHet_LD0.5.PROJ.eval[1,1]/sum(
+    no_warthog.NoMono.NoMiss.NoHet_LD0.5.PROJ.eval)*100,digits=2)
+no_warthog.NoMono.NoMiss.NoHet_LD0.5.PROJ.eval2 <- round(
+  no_warthog.NoMono.NoMiss.NoHet_LD0.5.PROJ.eval[2,1]/sum(
+    no_warthog.NoMono.NoMiss.NoHet_LD0.5.PROJ.eval)*100,digits=2)
+
+no_warthog.NoMono.NoMiss.NoHet_LD0.5.PROJ.evec <- read.table("no_warthog.NoMono.NoMissPROJ.evec") %>% rename("ID" = "V1","PC1" = "V2","PC2" = "V3") %>% select (ID,PC1,PC2) %>%  inner_join(global_metadata, by="ID")
+```
+
+```{r}
+#PCA NOT projected
+no_warthog.NoMono.NoMiss.NoHet_LD0.5.NO.PROJ.eval <- read.table("no_warthog.NoMono.NoMiss.NoHet_LD0.5.NO.PROJ.eval",header=FALSE) 
+no_warthog.NoMono.NoMiss.NoHet_LD0.5.NO.PROJ.eval1<- round(
+  no_warthog.NoMono.NoMiss.NoHet_LD0.5.NO.PROJ.eval[1,1]/sum(
+    no_warthog.NoMono.NoMiss.NoHet_LD0.5.NO.PROJ.eval)*100,digits=2)
+no_warthog.NoMono.NoMiss.NoHet_LD0.5.NO.PROJ.eval2 <- round(
+  no_warthog.NoMono.NoMiss.NoHet_LD0.5.NO.PROJ.eval[2,1]/sum(
+    no_warthog.NoMono.NoMiss.NoHet_LD0.5.NO.PROJ.eval)*100,digits=2)
+
+no_warthog.NoMono.NoMiss.NoHet_LD0.5.NO.PROJ.evec <- read.table("no_warthog.NoMono.NoMiss.NoHet_LD0.5.NO.PROJ.evec") %>% rename("ID" = "V1","PC1" = "V2","PC2" = "V3") %>% select (ID,PC1,PC2) %>%  inner_join(global_metadata, by="ID")
+```
+
+```{r}
+jpeg("FIGURES/FINAL/Supp3Projected.png", units="in", width=7.5, height=5.5, res=900)
+ggplot(data=no_warthog.NoMono.NoMiss.NoHet_LD0.5.PROJ.evec,aes(x=PC1,y=PC2,color=Name,shape=Age))+
+  geom_point(size=4)+
+  theme_classic()+
+  labs(title="Project Global PCA", 
+       color = "Species",
+       x=paste("PC1 ",no_warthog.NoMono.NoMiss.NoHet_LD0.5.PROJ.eval1, "%"),
+       y=paste("PC2 ",no_warthog.NoMono.NoMiss.NoHet_LD0.5.PROJ.eval2, "%"))+
+  scale_color_manual(labels=c("newly sequenced",expression(italic("Sus barbatus")),expression(italic("Sus cebifrons")),expression(italic("Sus celebensis")),expression(italic("Sus scrofa")),expression(italic("Sus verrucosus"))),values=colors6)+
+  geom_text_repel(aes(label=Tree.ID),size=2,max.overlaps=50, box.padding = 0.5, point.padding=0.3)
+dev.off()
+```
+
+```{r,include=FALSE,eval=FALSE}
+no_warthog.NoMono.NoMiss.NoHet_LD0.5.NO.PROJ.evec <- no_warthog.NoMono.NoMiss.NoHet_LD0.5.NO.PROJ.evec %>% mutate(
+  ID = case_when(ID=="SAMEA3497880" ~ "ScrGreece",
+                       ID=="3" ~ "5_3",
+                       ID=="ERR173210.1" ~ "Cel1",
+                       ID=="SAMEA6141243"~"Cel2",
+                       ID=="SAMEA6141244"~"Cel3",
+                       ID=="SAMEA6141239"~"Barb1",
+                       ID=="SAMEA6141240"~"Barb2",
+                       ID=="SAMEA6141241"~"Cebi1",
+                       ID=="SAMEA6141242"~"Cebi2",
+                       ID=="SAMEA6141245"~"Ver1",
+                       ID=="SAMEA6141246"~"Ver2",
+                       ID=="ERR173176.1"~"ScrSu1",
+                       ID=="ERR173178.1"~"ScrSu2",
+                       ID=="SAMEA3497823"~"ScrJapan",
+                       ID=="SAMEA3497818"~"ScrChina",
+                       ID=="SAMEA3497880"~"ScrGreece",
+                       .default = ID)
+)
+```
+
+```{r}
+ggplot(data=no_warthog.NoMono.NoMiss.NoHet_LD0.5.NO.PROJ.evec,aes(x=PC1,y=PC2,color=Name,shape=Age))+
+  geom_point(size=4)+
+  theme_classic()+
+  labs(title="Full Genome -- 374,197 variants. NO Projection.", 
+       subtitle="No missing data, maf 0.03, 20 10 .5 LD filter",
+       color = "Species",
+       x=paste("PC1 ",no_warthog.NoMono.NoMiss.NoHet_LD0.5.NO.PROJ.eval1, "%"),
+       y=paste("PC2 ",no_warthog.NoMono.NoMiss.NoHet_LD0.5.NO.PROJ.eval2, "%"))+
+  geom_text_repel(aes(label=ID),size=2,max.overlaps=50)
+```
+
+```{r,include=FALSE,eval=FALSE}
+
+#FOR EXPORTING THE PLOT
+
+colors6 <- c('#AA3377','#4477AA', '#228833','#EE6677', '#66CCEE', '#CCBB44')
+colors7 <- c('#AA3377','#4477AA', '#228833','#EE6677', '#66CCEE', '#CCBB44',"#BBBBBB")
+
+#color<-grad c("#a93276","#b43876","#bf3f77","#c94777","#d34e77","#dc5777","#e55f77","#ee6877","#DDDDDD")
+
+jpeg("FIGURES/FullGenome300000.jpeg", units="in", width=7.5, height=5.5, res=300)
+ggplot(data=no_warthog.NoMono.NoMiss.NoHet_LD0.5.NO.PROJ.evec,aes(x=PC1,y=PC2,color=Name,shape=Age))+
+  geom_point(size=4)+
+  theme_classic()+
+  labs(color = "Species",
+       x=paste("PC1 ",no_warthog.NoMono.NoMiss.NoHet_LD0.5.NO.PROJ.eval1, "%"),
+       y=paste("PC2 ",no_warthog.NoMono.NoMiss.NoHet_LD0.5.NO.PROJ.eval2, "%"))+
+  scale_color_manual(labels=c("newly sequenced",expression(italic("Sus barbatus")),expression(italic("Sus cebifrons")),expression(italic("Sus celebensis")),expression(italic("Sus scrofa")),expression(italic("Sus verrucosus"))),values=colors6)+
+  geom_text_repel(aes(label=ID),size=2,max.overlaps=50, box.padding = 0.5, point.padding=0.2)+
+  theme(legend.position = c(.8,.7))
+dev.off()
+```
+
+### Relax the Missingness filter
+
+#### Filter
+
+Just to confirm that this is the filtering that we want, let's go back and relax the missingness filter to allow up to 10% missing at each site. We'll only make one PCA -- not projected.
+
+```{bash, eval=FALSE}
+#header
+
+#!/bin/bash
+#SBATCH --ntasks-per-node=1
+#SBATCH --cpus-per-task=28
+#SBATCH --time=72:00:00
+#SBATCH --job-name=plink_TEN_missing
+#SBATCH --mail-type=ALL
+#SBATCH --mail-user=Hope.Anderson@lmu.de
+#SBATCH --clusters=biohpc_gen
+#SBATCH --partition=biohpc_gen_production
+
+module load slurm_setup
+eval "$(conda shell.bash hook)"
+```
+
+```{bash, eval=FALSE}
+#relaxed_missing.sh
+conda activate plenv
+plink --vcf ../no_warthog.vcf.gz --geno .1 --make-bed --out no_warthog_MissTEN
+```
+
+Now, we filter out heterozygous sites.
+```{bash, eval=FALSE}
+plink --bfile no_warthog_MissTEN --make-bed --maf 0.03 --out no_warthog_MissTEN.NoHet
+plink --bfile no_warthog_MissTEN.NoHet --recode --out no_warthog_MissTEN.NoHet
+```
+
+Fix the map
+```{bash,eval=FALSE}
+cat no_warthog_MissTEN.NoHet.map | awk 'BEGIN {OFS="\t"};{print $1,$1"_"$4,$3,$4}' > new_no_warthog_MissTEN.NoHet.map
+rm no_warthog_MissTEN.NoHet.map
+mv new_no_warthog_MissTEN.NoHet.map no_warthog_MissTEN.NoHet.map
+```
+
+And apply the LD filter.
+
+```{bash,eval=FALSE}
+plink --file no_warthog_MissTEN.NoHet --indep-pairwise 20 10 0.5 --recode --out no_warthog_MissTEN.NoHet_LD
+plink --file no_warthog_MissTEN.NoHet --out no_warthog_MissTEN.NoHet_LD0.5 --exclude no_warthog_MissTEN.NoHet_LD.prune.out --make-bed --recode
+```
+
+This leaves us with 3,300,956 variants.
+
+Eigenstrat conversion: par file.
+```{bash, eval=FALSE}
+#no_warthog_MissTEN.NoHet_LD0.5.par.PED.EIGENSTRAT
+genotypename:    no_warthog_MissTEN.NoHet_LD0.5.ped
+snpname:         no_warthog_MissTEN.NoHet_LD0.5.map
+indivname:       no_warthog_MissTEN.NoHet_LD0.5.ped
+outputformat:    EIGENSTRAT
+genotypeoutname: no_warthog_MissTEN.NoHet_LD0.5.geno
+snpoutname:      no_warthog_MissTEN.NoHet_LD0.5.snp
+indivoutname:    no_warthog_MissTEN.NoHet_LD0.5.ind
+familynames:     NO
+```
+
+File conversion:
+```{bash, eval=FALSE}
+conda activate Eigensoft
+convertf -p no_warthog_MissTEN.NoHet_LD0.5.par.PED.EIGENSTRAT
+```
+
+Fix the ind file:
+```{bash, eval=FALSE}
+cat no_warthog_MissTEN.NoHet_LD0.5.ind | awk 'BEGIN {OFS="\t"};{print $1,"U",$1}' > no_warthog_MissTEN.NoHet_LD0.5.ind_new
+rm no_warthog_MissTEN.NoHet_LD0.5.ind
+mv no_warthog_MissTEN.NoHet_LD0.5.ind_new no_warthog_MissTEN.NoHet_LD0.5.ind
+```
+
+#### PCA
+
+PCA without projection -- parameter file:
+```{bash, eval=FALSE}
+#Smart_PCA_NO_Proj.param
+genotypename: no_warthog_MissTEN.NoHet_LD0.5.geno
+snpname: no_warthog_MissTEN.NoHet_LD0.5.snp
+indivname: no_warthog_MissTEN.NoHet_LD0.5.ind
+evecoutname: no_warthog_MissTEN.NoHet_LD0.5.NO.PROJ.evec
+evaloutname: no_warthog_MissTEN.NoHet_LD0.5.NO.PROJ.eval
+numoutevec: 20
+numthreads: 1
+```
+
+Run the PCA
+```{bash, eval=FALSE}
+conda activate Eigensoft
+smartpca -p Smart_PCA_NO_Proj.param > Smart_PCA_NO_Proj.log
+```
+
+#### Graph
+
+```{r}
+no_warthog_MissTEN.NoHet_LD0.5.NO.PROJ.eval <- read.table("no_warthog_MissTEN.NoHet_LD0.5.NO.PROJ.eval",header=FALSE) 
+no_warthog_MissTEN.NoHet_LD0.5.NO.PROJ.eval1<- round(
+  no_warthog_MissTEN.NoHet_LD0.5.NO.PROJ.eval[1,1]/sum(
+    no_warthog_MissTEN.NoHet_LD0.5.NO.PROJ.eval)*100,digits=2)
+no_warthog_MissTEN.NoHet_LD0.5.NO.PROJ.eval2 <- round(
+  no_warthog_MissTEN.NoHet_LD0.5.NO.PROJ.eval[2,1]/sum(
+    no_warthog_MissTEN.NoHet_LD0.5.NO.PROJ.eval)*100,digits=2)
+
+no_warthog_MissTEN.NoHet_LD0.5.NO.PROJ.evec <- read.table("no_warthog_MissTEN.NoHet_LD0.5.NO.PROJ.evec") %>% rename("ID" = "V1","PC1" = "V2","PC2" = "V3") %>% select (ID,PC1,PC2) %>% inner_join(global_metadata, by="ID")
+```
+
+```{r}
+colors6 <- c('#AA3377','#4477AA', '#228833','#EE6677', '#66CCEE', '#CCBB44')
+
+jpeg("FIGURES/FINAL/SuppFig1.png", units="in", width=7.5, height=5.5, res=900)
+ggplot(data=no_warthog_MissTEN.NoHet_LD0.5.NO.PROJ.evec,aes(x=PC1,y=PC2,color=Name,shape=Age))+
+  geom_point(size=4)+
+  theme_classic()+
+  labs(title="--geno 0.10 --maf .001, 20 10 .5 LD filter", 
+       color = "Species",
+       x=paste("PC1 ",no_warthog_MissTEN.NoHet_LD0.5.NO.PROJ.eval1, "%"),
+       y=paste("PC2 ",no_warthog_MissTEN.NoHet_LD0.5.NO.PROJ.eval2, "%"))+
+  scale_color_manual(labels=c("newly sequenced",expression(italic("Sus barbatus")),expression(italic("Sus cebifrons")),expression(italic("Sus celebensis")),expression(italic("Sus scrofa")),expression(italic("Sus verrucosus"))),values=colors6)+
+  geom_text_repel(aes(label=Tree.ID),size=2,max.overlaps=50, box.padding = 0.5, point.padding=0.2)+
+  theme(legend.position = c(.8,.7))
+dev.off()
+```
+
+It looks the same, so we know we didn't over filter the dataset. 
+
+# Analysis 
+
+## Map
+
+To see what we're working with, let's visualize a map of all of our samples.
+```{r}
+Map <- map_data("world")
+
+colors7 <- c('#AA3377',"#BBBBBB",'#4477AA', '#228833','#EE6677', '#66CCEE', '#CCBB44')
+
+ggplot(Map, aes(x = long, y = lat, group=group)) +
+  xlim(-25,175)+
+  ylim(-50,80)+
+  coord_equal()+
+  geom_polygon(fill="#DDDDDD90", colour = "white")+
+  geom_point(data=global_metadata, aes(x = Long, y = Lat, group=NULL, color=Name, shape=Age),size=2)+
+  labs(color="Name")+
+  theme_void()+
+  scale_color_manual(values=colors7)
+```
+
+Let's also make a map of just the newly sequenced samples.
+```{r}
+#old code
+Map <- map_data("world")
+Islands <- subset(Map, region == "Indonesia")
+Sulawesi <- subset(Islands,subregion == "Sulawesi")
+
+celebensis_metadata <- global_metadata %>% subset(Loc_Known=="Y"|ID=="GL596")
+```
+
+## *Sus celebensis* PCA
+
+```{bash, eval=FALSE}
+#header
+
+#!/bin/bash
+#SBATCH --ntasks-per-node=1
+#SBATCH --cpus-per-task=28
+#SBATCH --time=72:00:00
+#SBATCH --job-name=onlyCel_Nomiss
+#SBATCH --mail-type=ALL
+#SBATCH --mail-user=Hope.Anderson@lmu.de
+#SBATCH --clusters=biohpc_gen
+#SBATCH --partition=biohpc_gen_production
+
+module load slurm_setup
+eval "$(conda shell.bash hook)"
+```
+
+We want to make a PCA of just *celebensis*, including our newly sequenced samples 
+```{bash,eval=FALSE}
+#onlycel_NoMiss.sh
+conda activate plenv
+plink --vcf ../OnlyCel_NOG.vcf.gz --geno 0 --make-bed --out OnlyCel_NoMiss
+```
+
+Now, we filter out heterozygous sites.
+```{bash, eval=FALSE}
+plink --bfile OnlyCel_NoMiss --make-bed --maf 0.03 --out OnlyCel_NoMiss.NoHet
+plink --bfile OnlyCel_NoMiss.NoHet --recode --out OnlyCel_NoMiss.NoHet
+```
+
+Fix the map
+```{bash,eval=FALSE}
+cat OnlyCel_NoMiss.NoHet.map | awk 'BEGIN {OFS="\t"};{print $1,$1"_"$4,$3,$4}' > new_OnlyCel_NoMiss.NoHet.map
+rm OnlyCel_NoMiss.NoHet.map
+mv new_OnlyCel_NoMiss.NoHet.map OnlyCel_NoMiss.NoHet.map
+```
+
+And apply the LD filter.
+
+```{bash,eval=FALSE}
+plink --file OnlyCel_NoMiss.NoHet --indep-pairwise 20 10 0.5 --recode --out OnlyCel_NoMiss.NoHet_LD
+plink --file OnlyCel_NoMiss.NoHet --out OnlyCel_NoMiss.NoHet_LD0.5 --exclude OnlyCel_NoMiss.NoHet_LD.prune.out --make-bed --recode
+```
+
+This leaves us with 279,450 variants.
+
+Eigenstrat conversion: par file.
+```{bash, eval=FALSE}
+#OnlyCel_NoMiss.NoHet_LD0.5.par.PED.EIGENSTRAT
+genotypename:    OnlyCel_NoMiss.NoHet_LD0.5.ped
+snpname:         OnlyCel_NoMiss.NoHet_LD0.5.map
+indivname:       OnlyCel_NoMiss.NoHet_LD0.5.ped
+outputformat:    EIGENSTRAT
+genotypeoutname: OnlyCel_NoMiss.NoHet_LD0.5.geno
+snpoutname:      OnlyCel_NoMiss.NoHet_LD0.5.snp
+indivoutname:    OnlyCel_NoMiss.NoHet_LD0.5.ind
+familynames:     NO
+```
+
+File conversion:
+```{bash, eval=FALSE}
+conda activate Eigensoft
+convertf -p OnlyCel_NoMiss.NoHet_LD0.5.par.PED.EIGENSTRAT
+```
+
+Fix the ind file:
+```{bash, eval=FALSE}
+cat OnlyCel_NoMiss.NoHet_LD0.5.ind | awk 'BEGIN {OFS="\t"};{print $1,"U",$1}' > OnlyCel_NoMiss.NoHet_LD0.5.ind_new
+rm OnlyCel_NoMiss.NoHet_LD0.5.ind
+mv OnlyCel_NoMiss.NoHet_LD0.5.ind_new OnlyCel_NoMiss.NoHet_LD0.5.ind
+```
+
+#### PCA
+
+PCA without projection -- parameter file:
+```{bash, eval=FALSE}
+#Smart_PCA.param
+genotypename: OnlyCel_NoMiss.NoHet_LD0.5.geno
+snpname: OnlyCel_NoMiss.NoHet_LD0.5.snp
+indivname: OnlyCel_NoMiss.NoHet_LD0.5.ind
+evecoutname: OnlyCel_NoMiss.NoHet_LD0.5.smartPCA.evec
+evaloutname: OnlyCel_NoMiss.NoHet_LD0.5.smartPCA.eval
+numoutevec: 20
+numthreads: 1
+```
+
+Run the PCA
+```{bash, eval=FALSE}
+smartpca -p Smart_PCA.param > Smart_PCA.log
+```
+
+To compare, let's also make an emu PCA (which is supposed to be good at handelling missing data) and see if it looks any different from ours.
+
+```{bash,eval=FALSE}
+conda activate mu
+emu --p OnlyCel_NoMiss.NoHet_LD0.5 --n_eig 14 --threads 64 --out OnlyCel_NoMiss.NoHet_LD0.5.emu
+```
+
+#### Graph
+
+SmartPCA
+
+```{r}
+OnlyCel_NoMiss.NoHet_LD0.5.smartPCA.eval <- read.table("OnlyCel_NoMiss.NoHet_LD0.5.smartPCA.eval",header=FALSE) 
+OnlyCel_NoMiss.NoHet_LD0.5.smartPCA.eval1<- round(
+  OnlyCel_NoMiss.NoHet_LD0.5.smartPCA.eval[1,1]/sum(
+    OnlyCel_NoMiss.NoHet_LD0.5.smartPCA.eval)*100,digits=2)
+OnlyCel_NoMiss.NoHet_LD0.5.smartPCA.eval2 <- round(
+  OnlyCel_NoMiss.NoHet_LD0.5.smartPCA.eval[2,1]/sum(
+    OnlyCel_NoMiss.NoHet_LD0.5.smartPCA.eval)*100,digits=2)
+
+OnlyCel_NoMiss.NoHet_LD0.5.smartPCA.eval3 <- round(
+  OnlyCel_NoMiss.NoHet_LD0.5.smartPCA.eval[3,1]/sum(
+    OnlyCel_NoMiss.NoHet_LD0.5.smartPCA.eval)*100,digits=2)
+OnlyCel_NoMiss.NoHet_LD0.5.smartPCA.eval4 <- round(
+  OnlyCel_NoMiss.NoHet_LD0.5.smartPCA.eval[4,1]/sum(
+    OnlyCel_NoMiss.NoHet_LD0.5.smartPCA.eval)*100,digits=2)
+
+OnlyCel_NoMiss.NoHet_LD0.5.smartPCA.evec <- read.table("OnlyCel_NoMiss.NoHet_LD0.5.smartPCA.evec") %>% rename("ID" = "V1","PC1" = "V2","PC2" = "V3","PC3" = "V4", "PC4" = "V5") %>% select (ID,PC1,PC2,PC3,PC4) %>%  inner_join(global_metadata, by="ID")
+```
+
+The names of our individuals are not very clear. We'll need to make them match the names we used for the trees.
+```{r}
+OnlyCel_NoMiss.NoHet_LD0.5.smartPCA.evec <- OnlyCel_NoMiss.NoHet_LD0.5.smartPCA.evec %>% mutate(
+  ID = case_when(ID=="SAMEA3497880" ~ "ScrGreece",
+                       ID=="3" ~ "5_3",
+                       ID=="ERR173210.1" ~ "Cel1",
+                       ID=="SAMEA6141243"~"Cel2",
+                       ID=="SAMEA6141244"~"Cel3",
+                       ID=="SAMEA6141239"~"Barb1",
+                       ID=="SAMEA6141240"~"Barb2",
+                       ID=="SAMEA6141241"~"Cebi1",
+                       ID=="SAMEA6141242"~"Cebi2",
+                       ID=="SAMEA6141245"~"Ver1",
+                       ID=="SAMEA6141246"~"Ver2",
+                       ID=="ERR173176.1"~"ScrSu1",
+                       ID=="ERR173178.1"~"ScrSu2",
+                       ID=="SAMEA3497823"~"ScrJapan",
+                       ID=="SAMEA3497818"~"ScrChina",
+                       ID=="SAMEA3497880"~"ScrGreece",
+                       .default = ID)
+)
+
+OnlyCel_NoMiss.NoHet_LD0.5.smartPCA.evec <- OnlyCel_NoMiss.NoHet_LD0.5.smartPCA.evec %>% mutate(
+  Sulawesi_Region = case_when(Sulawesi_Region=="" ~ "unknown",
+                       .default = Sulawesi_Region)
+)
+```
+
+We'll also make the regions an ordered factor going from North to South.
+```{r}
+region_levels=c("North","CentralNorth","Central","East","SouthEast","Buton","Timor","Bali","unknown")
+OnlyCel_NoMiss.NoHet_LD0.5.smartPCA.evec$Sulawesi_Region <- factor(OnlyCel_NoMiss.NoHet_LD0.5.smartPCA.evec$Sulawesi_Region, levels=region_levels)
+```
+
+Now we can graph:
+```{r}
+ggplot(data=OnlyCel_NoMiss.NoHet_LD0.5.smartPCA.evec,aes(x=PC1,y=PC2,color=Sulawesi_Region,shape=Age))+
+  geom_point(size=4)+
+  theme_classic()+
+  labs(title="SmartPCA -- 265,529 variants.", 
+       subtitle = "No missingness, no heterozygous sites, 20 10 .5 LD filter",
+       color = "Sulawesi_Region",
+       x=paste("PC1 ",OnlyCel_NoMiss.NoHet_LD0.5.smartPCA.eval1, "%"),
+       y=paste("PC2 ",OnlyCel_NoMiss.NoHet_LD0.5.smartPCA.eval2, "%"))+
+  geom_text_repel(aes(label=ID),size=2,max.overlaps=50)
+
+ggplot(data=OnlyCel_NoMiss.NoHet_LD0.5.smartPCA.evec,aes(x=PC2,y=PC3,color=Sulawesi_Region,shape=Age))+
+  geom_point(size=4)+
+  theme_classic()+
+  labs(title="SmartPCA -- 265,529 variants.", 
+       subtitle = "No missingness, no heterozygous sites, 20 10 .5 LD filter",
+       color = "Sulawesi_Region",
+       x=paste("PC3 ",OnlyCel_NoMiss.NoHet_LD0.5.smartPCA.eval3, "%"),
+       y=paste("PC2 ",OnlyCel_NoMiss.NoHet_LD0.5.smartPCA.eval2, "%"))+
+  geom_text_repel(aes(label=ID),size=2,max.overlaps=50)
+```
+
+```{r,fig.dim = c(10, 4),include=FALSE,eval=FALSE}
+
+#colorsgrad <- c("#993404","#d95f0e","#fe9929","#fec44f","#a1dab4","#41b6c4","#2c7fb8","#253494","#DDDDDD")
+
+col_vir<- c("#440154FF", "#46337EFF", "#365C8DFF", "#277F8EFF", "#1FA187FF", "#4AC16DFF", "#9FDA3AFF", "#FDE725FF","#DDDDDD")
+
+#color_grad<-c("#440154FF", "#3B528BFF", "#21908CFF", "#5DC863FF", "#FDE725FF","#a93276","#ce4b77","#ee6877","#CCCCCC")
+
+CELPC1PC2 <- ggplot(data=OnlyCel_NoMiss.NoHet_LD0.5.smartPCA.evec,aes(x=PC1,y=PC2,color=Sulawesi_Region,shape=Age))+
+  geom_point(size=6)+
+  theme_classic()+
+  labs(color = "Sulawesi_Region",
+       x=paste("PC1 ",OnlyCel_NoMiss.NoHet_LD0.5.smartPCA.eval1, "%"),
+       y=paste("PC2 ",OnlyCel_NoMiss.NoHet_LD0.5.smartPCA.eval2, "%"))+
+  geom_text_repel(aes(label=ID),size=2,max.overlaps=50, box.padding = 0.5, point.padding=0.2)+
+    scale_color_manual(values=col_vir)+
+  theme(legend.position = "none")
+
+CELPC3PC2 <- ggplot(data=OnlyCel_NoMiss.NoHet_LD0.5.smartPCA.evec,aes(x=PC3,y=PC2,color=Sulawesi_Region,shape=Age))+
+  geom_point(size=6)+
+  theme_classic()+
+  labs(color = "Region",
+       x=paste("PC3 ",OnlyCel_NoMiss.NoHet_LD0.5.smartPCA.eval2, "%"),
+       y=paste("PC2 ",OnlyCel_NoMiss.NoHet_LD0.5.smartPCA.eval3, "%"))+
+  geom_text_repel(aes(label=ID),size=2,max.overlaps=50, box.padding = 0.5, point.padding=0.2)+
+    scale_color_manual(values=col_vir)
+  
+jpeg("FIGURES/Celebensis3axes.jpeg", units="in", width=12.5, height=5.5, res=300)
+ggarrange(CELPC1PC2,CELPC3PC2, labels = "auto", nrow = 1, ncol = 2)
+dev.off()
+```
+
+EMU PCA
+```{r}
+OnlyCel_NoMiss.NoHet_LD0.5.emu.eigenvals <- read.table("OnlyCel_NoMiss.NoHet_LD0.5.emu.eigenvals",header=FALSE) 
+OnlyCel_NoMiss.NoHet_LD0.5.emu.eigenval1<- round(
+  OnlyCel_NoMiss.NoHet_LD0.5.emu.eigenvals[1,1]/sum(
+    OnlyCel_NoMiss.NoHet_LD0.5.emu.eigenvals)*100,digits=2)
+OnlyCel_NoMiss.NoHet_LD0.5.emu.eigenval2 <- round(
+  OnlyCel_NoMiss.NoHet_LD0.5.emu.eigenvals[2,1]/sum(
+    OnlyCel_NoMiss.NoHet_LD0.5.emu.eigenvals)*100,digits=2)
+OnlyCel_NoMiss.NoHet_LD0.5.emu.eigenval3 <- round(
+  OnlyCel_NoMiss.NoHet_LD0.5.emu.eigenvals[3,1]/sum(
+    OnlyCel_NoMiss.NoHet_LD0.5.emu.eigenvals)*100,digits=2)
+
+OnlyCel_NoMiss.NoHet_LD0.5.emu.IND <- read.table("OnlyCel_NoMiss.NoHet_LD0.5.emu.IND") %>% rename("ID" = "V1") %>% select("ID")
+
+OnlyCel_NoMiss.NoHet_LD0.5.emu.eigenvecs <- read.table("OnlyCel_NoMiss.NoHet_LD0.5.emu.eigenvecs") %>% cbind (OnlyCel_NoMiss.NoHet_LD0.5.emu.IND) %>% rename("PC1" = "V1","PC2" = "V2", "PC3" = "V3") %>% select (ID,PC1,PC2,PC3) %>%  inner_join(global_metadata, by="ID")
+
+OnlyCel_NoMiss.NoHet_LD0.5.emu.eigenvecs <- OnlyCel_NoMiss.NoHet_LD0.5.emu.eigenvecs %>% mutate(
+  ID = case_when(ID=="ERR173210.1" ~ "Cel1",
+                       ID=="SAMEA6141243"~"Cel2",
+                       ID=="SAMEA6141244"~"Cel3",
+                       ID=="3" ~ "5_3",
+                       .default = ID)
+)
+```
+
+```{r}
+
+OnlyCel_NoMiss.NoHet_LD0.5.emu.eigenvecs <- OnlyCel_NoMiss.NoHet_LD0.5.emu.eigenvecs %>% mutate(
+  Sulawesi_Region = case_when(Sulawesi_Region=="" ~ "unknown",
+                       .default = Sulawesi_Region)
+)
+
+# We'll also make the regions an ordered factor going from North to South.
+
+region_levels=c("North","CentralNorth","Central","East","SouthEast","Buton","Timor","Bali","unknown")
+OnlyCel_NoMiss.NoHet_LD0.5.emu.eigenvecs$Sulawesi_Region <- factor(OnlyCel_NoMiss.NoHet_LD0.5.emu.eigenvecs$Sulawesi_Region, levels=region_levels)
+
+EMU1 <- ggplot(data=OnlyCel_NoMiss.NoHet_LD0.5.emu.eigenvecs,aes(x=PC1,y=PC2,color=Sulawesi_Region,shape=Age))+
+  geom_point(size=4)+
+  theme_classic()+
+  labs(color = "Region",
+       x=paste("PC1 ",OnlyCel_NoMiss.NoHet_LD0.5.emu.eigenval1, "%"),
+       y=paste("PC2 ",OnlyCel_NoMiss.NoHet_LD0.5.emu.eigenval2, "%"))+
+  geom_text_repel(aes(label=ID),size=2,max.overlaps=50, box.padding = 0.5, point.padding=0.2)+
+    scale_color_manual(values=col_vir)+
+  theme(legend.position = "none")
+
+EMU2 <- ggplot(data=OnlyCel_NoMiss.NoHet_LD0.5.emu.eigenvecs,aes(x=PC3,y=PC2,color=Sulawesi_Region,shape=Age))+
+  geom_point(size=4)+
+  theme_classic()+
+  labs(color = "Sulawesi_Region",
+       x=paste("PC3 ",OnlyCel_NoMiss.NoHet_LD0.5.emu.eigenval3, "%"),
+       y=paste("PC2 ",OnlyCel_NoMiss.NoHet_LD0.5.emu.eigenval2, "%"))+
+  geom_text_repel(aes(label=ID),size=2,max.overlaps=50, box.padding = 0.5, point.padding=0.2)+
+    scale_color_manual(values=col_vir)
+
+
+jpeg("FIGURES/EMUSUPP.jpeg", units="in", width=12.5, height=5.5, res=600)
+ggarrange(EMU1,EMU2, labels = "auto", nrow = 1, ncol = 2)
+dev.off()
+```
+
+## Mitochondrial tree
+
+### Setup
+
+To pull out the mitochondrial DNA, the easiest way is to go from BAM to fasta using the reference genome it was aligned to, and then extracting the mitochondrial DNA. The mitochondrial bams and the fastas are directed into temporary directories.
+
+```{bash, eval=FALSE, include=FALSE}
+#header
+
+#!/bin/bash
+#SBATCH --ntasks-per-node=1
+#SBATCH --cpus-per-task=28
+#SBATCH --time=72:00:00
+#SBATCH --job-name=extract_mito_fastas
+#SBATCH --mail-type=ALL
+#SBATCH --mail-user=Hope.Anderson@lmu.de
+#SBATCH --clusters=biohpc_gen
+#SBATCH --partition=biohpc_gen_production
+
+module load slurm_setup
+eval "$(conda shell.bash hook)"
+```
+
+```{bash, eval=FALSE}
+#extract_fastas.sh
+while read -r file
+do
+  conda activate Samtools
+  samtools view ../"$file" MT -o extract_temp/MT_"$file"
+  samtools index -b extract_temp/MT_"$file"
+  conda activate HTSBox
+  htsbox pileup -f ../Sus_scrofa.Sscrofa11.1.dna.toplevel.fa -l25 -T6 -q30 -Q30 -M extract_temp/MT_"$file" > fastas/$(echo "$file".fasta | sed 's/.bam//')
+done<../bam_list.txt
+```
+
+Now we have fastas for the mitochondrial genome of each individual. We need to change their header slightly, so that we don't loose track of which fasta belongs to which individual when we concatenate them.  
+```{bash, eval=FALSE}
+#add sample names to header
+#fasta_filenames.sh
+for i in *.fasta
+  do
+  sed -i "s/>MT/>`basename -s .fasta $i`/g" $i
+done
+
+#After this, we still have to go in manually and change some of the file names to the species names, because they beginnings of the names are too similar and will get cut off by the aligner.
+```
+
+Next, we simply concatenate all the fastas together.
+```{bash, eval=FALSE}
+#concat all files together 
+cat *.fasta > ../MT.global.fasta
+```
+
+```{bash,eval=FALSE,include=FALSE}
+#header
+
+#!/bin/bash
+#SBATCH --ntasks-per-node=1
+#SBATCH --cpus-per-task=28
+#SBATCH --time=72:00:00
+#SBATCH --job-name=mito_align
+#SBATCH --mail-type=ALL
+#SBATCH --mail-user=Hope.Anderson@lmu.de
+#SBATCH --clusters=biohpc_gen
+#SBATCH --partition=biohpc_gen_production
+
+module load slurm_setup
+eval "$(conda shell.bash hook)"
+```
+
+### Alignment
+
+Then we can align the genomes.
+```{bash,eval=FALSE}
+#align_mito.sh
+conda activate Mafft
+mafft --maxiterate 1000 --localpair --phylipout MT.global.fasta > MT.global.ALIGNED.fasta
+```
+
+We export the aligned fasta and check the alignment manually to make sure none of the individuals are misaligned.It looks good :), thought there are some parts that are missing some data, especially with our samples.
+
+```{r,echo=FALSE}
+knitr::include_graphics("alignment.png")
+```
+
+### Making the tree
+
+Next, we run the tree using iqtree.
+
+```{bash, eval=FALSE,include=FALSE}
+#header
+
+#!/bin/bash
+#SBATCH --ntasks-per-node=1
+#SBATCH --cpus-per-task=28
+#SBATCH --time=72:00:00
+#SBATCH --job-name=make_tree
+#SBATCH --mail-type=ALL
+#SBATCH --mail-user=Hope.Anderson@lmu.de
+#SBATCH --clusters=biohpc_gen
+#SBATCH --partition=biohpc_gen_production
+
+module load slurm_setup
+eval "$(conda shell.bash hook)"
+```
+
+```{bash, eval=FALSE}
+#IQ_Tree.sh
+conda activate IQtree
+iqtree -s MT.global.ALIGNED.fasta -m MFP -B 1000 --prefix MT.global
+```
+
+### Plotting the tree
+
+With IQ tree
+
+## Nuclear tree
+
+In order to make the nuclear tree, we need to filter from our VCF the same way we established -- with no missingness, no heterozygous sites, and a 20 10 .5 linkage DE filter.
+
+```{bash, eval=FALSE}
+#header
+
+#!/bin/bash
+#SBATCH --ntasks-per-node=1
+#SBATCH --cpus-per-task=28
+#SBATCH --time=72:00:00
+#SBATCH --job-name=global_no_missing
+#SBATCH --mail-type=ALL
+#SBATCH --mail-user=Hope.Anderson@lmu.de
+#SBATCH --clusters=biohpc_gen
+#SBATCH --partition=biohpc_gen_production
+
+module load slurm_setup
+eval "$(conda shell.bash hook)"
+```
+
+```{bash, eval=FALSE}
+#global_no_missing.sh
+conda activate plenv
+plink --vcf ../globalExluDupInd.vcf.gz --geno 0 --make-bed --out global_NoMiss
+```
+
+Now, we filter out heterozygous sites.
+```{bash, eval=FALSE}
+plink --bfile global_NoMiss --make-bed --maf 0.03 --out global_NoMiss.NoHet
+plink --bfile global_NoMiss --recode --out global_NoMiss.NoHet
+```
+
+Fix the map
+```{bash,eval=FALSE}
+cat global_NoMiss.NoHet.map | awk 'BEGIN {OFS="\t"};{print $1,$1"_"$4,$3,$4}' > new_global_NoMiss.NoHet.map
+rm global_NoMiss.NoHet.map
+mv new_global_NoMiss.NoHet.map global_NoMiss.NoHet.map
+```
+
+Filter for LD
+```{bash,eval=FALSE}
+plink --file global_NoMiss.NoHet --indep-pairwise 20 10 0.5 --recode --out global_NoMiss.NoHet_LD
+plink --file global_NoMiss.NoHet --out global_NoMiss.NoHet_LD0.5 --exclude global_NoMiss.NoHet_LD.prune.out --make-bed --recode
+```
+
+Now, we go back to the VCF from the filtered plink fileset
+
+```{bash, eval=FALSE}
+plink --file global_NoMiss.NoHet_LD0.5 --recode vcf --out global_NoMiss.NoHet_LD0.5
+```
+
+```{bash,eval=FALSE}
+vcf2phylip/vcf2phylip.py -i  global_NoMiss.NoHet_LD0.5.vcf --output-prefix global_NoMiss.NoHet_LD0.5
+```
+
+```{bash,eval=FALSE}
+#header
+
+#!/bin/bash
+#SBATCH --ntasks-per-node=1
+#SBATCH --cpus-per-task=28
+#SBATCH --time=72:00:00
+#SBATCH --job-name=iqtree
+#SBATCH --mail-type=ALL
+#SBATCH --mail-user=Hope.Anderson@lmu.de
+#SBATCH --clusters=biohpc_gen
+#SBATCH --partition=biohpc_gen_production
+
+module load slurm_setup
+eval "$(conda shell.bash hook)"
+```
+
+```{bash,eval=FALSE}
+#iqtree.sh
+conda activate IQtree
+iqtree -s global_NoMiss.NoHet_LD0.5.min4.phy -m MFP+ASC -B 1000 --prefix global_NoMiss.NoHet_LD0.5 -st DNA -o SAMEA6141235_SAMEA6141235
+```
+
+## F3 statistics
+
+The F3 statistics are calculated via a pipeline developed by another lab member using ...
+
+First, we download the tsv with all possible comparrissons. We must first make a square matrix with all possible comparisons.
+```{r}
+all_f3.tsv<-read.table("all_f3.tsv",sep="\t",header=TRUE)
+minZ=min(all_f3.tsv$Z)
+maxZ=max(all_f3.tsv$Z)
+all_f3 <- all_f3.tsv %>% mutate(Z_scaled = (Z-minZ)/(maxZ-minZ))
+
+reverse_f3 <- all_f3 %>% mutate (new_Pop1 = Pop2, new_Pop2 = Pop1) %>% select (f3, se , Z, SNPs, Z_scaled, new_Pop1,new_Pop2) %>% rename ("Pop1" = "new_Pop1","Pop2"="new_Pop2")
+
+square_f3 <- rbind(all_f3,reverse_f3)
+```
+
+```{r,eval=FALSE,include=FALSE}
+#graph the square matrix just to look at it.
+ggplot(square_f3,aes(x=Pop2,y=Pop1,fill=Z_scaled))+
+  geom_tile()
+```
+
+```{r,include=FALSE}
+#fixing the names
+square_f3 <- square_f3 %>% mutate(
+  Pop1 = case_when(Pop1=="SAMEA3497880" ~ "ScrGreece",
+                       Pop1=="3" ~ "5_3",
+                       Pop1=="ERR173210.1" ~ "Cel1",
+                       Pop1=="SAMEA6141243"~"Cel2",
+                       Pop1=="SAMEA6141244"~"Cel3",
+                       Pop1=="SAMEA6141239"~"Barb1",
+                       Pop1=="SAMEA6141240"~"Barb2",
+                       Pop1=="SAMEA6141241"~"Cebi1",
+                       Pop1=="SAMEA6141242"~"Cebi2",
+                       Pop1=="SAMEA6141245"~"Ver1",
+                       Pop1=="SAMEA6141246"~"Ver2",
+                       Pop1=="ERR173176.1"~"ScrSu1",
+                       Pop1=="ERR173178.1"~"ScrSu2",
+                       Pop1=="SAMEA3497823"~"ScrJapan",
+                       Pop1=="SAMEA3497818"~"ScrChina",
+                       Pop1=="SAMEA3497880"~"ScrGreece",
+                       .default = Pop1)
+)
+
+square_f3 <- square_f3 %>% mutate(
+  Pop2 = case_when(Pop2=="SAMEA3497880" ~ "ScrGreece",
+                       Pop2=="3" ~ "5_3",
+                       Pop2=="ERR173210.1" ~ "Cel1",
+                       Pop2=="SAMEA6141243" ~ "Cel2",
+                       Pop2=="SAMEA6141244" ~ "Cel3",
+                       Pop2=="SAMEA6141239" ~ "Barb1",
+                       Pop2=="SAMEA6141240" ~ "Barb2",
+                       Pop2=="SAMEA6141241" ~ "Cebi1",
+                       Pop2=="SAMEA6141242" ~ "Cebi2",
+                       Pop2=="SAMEA6141245" ~ "Ver1",
+                       Pop2=="SAMEA6141246" ~ "Ver2",
+                       Pop2=="ERR173176.1" ~ "ScrSu1",
+                       Pop2=="ERR173178.1" ~ "ScrSu2",
+                       Pop2=="SAMEA3497823" ~ "ScrJapan",
+                       Pop2=="SAMEA3497818" ~ "ScrChina",
+                       Pop2=="SAMEA3497880" ~ "ScrGreece",
+                       .default = Pop2)
+)
+```
+
+We refactor the populations to be in the same order as the nodes on our nuclear tree.
+```{r}
+node_list <- c("Cel1", "Cel2","55K", "Cel3", "GL1218","GL1221","RB501", "5_3", "GL1240","333", "AL456","GL596", "AL460", "Barb1", "Barb2","Cebi1", "Cebi2", "Ver1","Ver2","ScrSu1","ScrSu2","AL523","ScrJapan",
+"ScrChina","ScrGreece")
+
+node_list<-node_list%>% rev()
+```
+
+This makes our square bracket into a triangle bracket.
+```{r}
+square_f3$Pop1 <- factor(square_f3$Pop1, levels=node_list)
+square_f3$Pop2 <- factor(square_f3$Pop2, levels=node_list)
+
+square_f3<- square_f3[order(square_f3$Pop1,square_f3$Pop2
+                            ),]
+```
+
+
+```{r}
+remove_list=c()
+triangle_f3 = data.frame(matrix(nrow = 0, ncol=8))
+colnames(triangle_f3) <- colnames(square_f3)
+for (i in unique(square_f3$Pop1))
+  {
+ subset_pop1 = square_f3 %>%
+   subset(Pop1==i)
+  remove_list=append(i,remove_list)
+  subset_pop1_add = subset_pop1[!subset_pop1$Pop2 %in% remove_list,]
+  triangle_f3 = rbind(triangle_f3,subset_pop1_add)
+}
+
+minf3 = min(triangle_f3$f3)
+maxf3 = max(triangle_f3$f3)
+triangle_f3 = triangle_f3 %>% mutate(f3_scaled = ((f3-minf3)/(maxf3-minf3)))
+
+```
+
+Graph the heat map:
+```{r}
+jpeg("FIGURES/F3heatmap.jpeg", units="in", width=7.5, height=5.5, res=300)
+ggplot(triangle_f3,aes(x=Pop1,y=Pop2,fill=Z_scaled))+
+  geom_tile()+
+  theme_classic()+
+  scale_y_discrete(position = "left")+
+  scale_x_discrete(position = "top")+
+  scale_fill_viridis(option="rocket",direction = -1)+
+  labs(fill="F3 Z score")+
+  theme(axis.title.x=element_blank(),
+        axis.title.y=element_blank(),
+        axis.text.x = element_text(angle = 270, vjust = 0.5, hjust=1))
+dev.off()
+```
+
+```{r}
+jpeg("FIGURES/NOTZheatmapF3.jpeg", units="in", width=7.5, height=5.5, res=300)
+ggplot(triangle_f3,aes(x=Pop1,y=Pop2,fill=f3_scaled))+
+  geom_tile()+
+  theme_classic()+
+  scale_y_discrete(position = "left")+
+  scale_x_discrete(position = "top")+
+  scale_fill_viridis(option="rocket",direction = -1)+
+  labs(fill="F3")+
+  theme(axis.title.x=element_blank(),
+        axis.title.y=element_blank(),
+        axis.text.x = element_text(angle = 270, vjust = 0.5, hjust=1))
+dev.off()
+```
+
+
+## IBS
+
+We're also interested in another measure of distance -- IBS.
+```{bash,eval=FALSE}
+plink --file no_warthog.NoMono.NoMiss.NoHet_LD0.5 --distance triangle 'ibs' --out no_warthog.NoMono.NoMiss.NoHet_LD0.5
+```
+
+Graph the heat map 
+```{r}
+IBS_ind<-read.table("no_warthog.NoMono.NoMiss.NoHet_LD0.5.mibs.id") %>% rename("ID"="V2")
+IBS<-umx_read_lower(file="no_warthog.NoMono.NoMiss.NoHet_LD0.5.mibs", diag = TRUE, names = NULL) %>% as.data.frame() 
+```
+
+```{r,include=FALSE}
+IBS_ind <- IBS_ind %>% mutate(
+  ID = case_when(ID=="SAMEA3497880" ~ "ScrGreece",
+                       ID=="3" ~ "5_3",
+                       ID=="ERR173210.1" ~ "Cel1",
+                       ID=="SAMEA6141243"~"Cel2",
+                       ID=="SAMEA6141244"~"Cel3",
+                       ID=="SAMEA6141239"~"Barb1",
+                       ID=="SAMEA6141240"~"Barb2",
+                       ID=="SAMEA6141241"~"Cebi1",
+                       ID=="SAMEA6141242"~"Cebi2",
+                       ID=="SAMEA6141245"~"Ver1",
+                       ID=="SAMEA6141246"~"Ver2",
+                       ID=="ERR173176.1"~"ScrSu1",
+                       ID=="ERR173178.1"~"ScrSu2",
+                       ID=="SAMEA3497823"~"ScrJapan",
+                       ID=="SAMEA3497818"~"ScrChina",
+                       ID=="SAMEA3497880"~"ScrGreece",
+                       .default = ID)
+)
+```
+
+```{r}
+colnames(IBS) <- IBS_ind$ID
+row.names(IBS) <- IBS_ind$ID
+IBS <- IBS %>% as.matrix () %>% melt() %>% rename("Pop1" = "Var1","Pop2" = "Var2", "IBS" = "value")
+```
+
+```{r}
+IBS$Pop1 <- factor(IBS$Pop1, levels=node_list)
+IBS$Pop2 <- factor(IBS$Pop2, levels=node_list)
+
+IBS<- IBS[order(IBS$Pop1,IBS$Pop2),] 
+```
+
+```{r}
+remove_list=c()
+triangle_IBS = data.frame(matrix(nrow = 0, ncol=3))
+colnames(triangle_IBS) <- colnames(IBS)
+for (i in unique(IBS$Pop1))
+  {subset_pop1 = IBS %>% subset(Pop1==i)
+  remove_list=append(i,remove_list)
+  subset_pop1_add = subset_pop1[!subset_pop1$Pop2 %in% remove_list,]
+  triangle_IBS = rbind(triangle_IBS,subset_pop1_add)
+}
+```
+
+```{r}
+minIBS=min(triangle_IBS$IBS)
+maxIBS=max(triangle_IBS$IBS)
+triangle_IBS <- triangle_IBS %>% mutate(IBS_scaled = (IBS-minIBS)/(maxIBS-minIBS))
+```
+
+```{r}
+jpeg("FIGURES/triangle_IBS.jpeg", units="in", width=7.5, height=5.6, res=300)
+ggplot(triangle_IBS,aes(x=Pop1,y=Pop2,fill=IBS_scaled))+
+  geom_tile()+
+  theme_classic()+
+  scale_y_discrete(position = "left")+
+  scale_x_discrete(position = "top")+
+  scale_fill_viridis(option="rocket",direction = -1)+
+  labs(fill="IBS")+
+  theme(axis.title.x=element_blank(),
+        axis.title.y=element_blank(),
+        axis.text.x = element_text(angle = 270, vjust = 0.5, hjust=1))
+dev.off()
+```
+
+Run some  admixture.
+
+```{bash,eval=FALSE,include=FALSE}
+#header
+
+#!/bin/bash
+#SBATCH --ntasks-per-node=1
+#SBATCH --cpus-per-task=28
+#SBATCH --time=72:00:00
+#SBATCH --job-name=admixture
+#SBATCH --mail-type=ALL
+#SBATCH --mail-user=Hope.Anderson@lmu.de
+#SBATCH --clusters=biohpc_gen
+#SBATCH --partition=biohpc_gen_production
+
+module load slurm_setup
+eval "$(conda shell.bash hook)"
+conda activate Adxmiture
+```
+
+```{bash, eval=FALSE}
+#admixture.sh
+admixture --cv=5 no_warthog.NoMono.NoMiss.NoHet_LD0.5.bed 9 > admixture_logk9.out
+```
+
+```{r}
+IBS_ind <- IBS_ind %>% mutate(
+  ID = case_when(ID=="SAMEA3497880" ~ "ScrGreece",
+                       ID=="3" ~ "5_3",
+                       ID=="ERR173210.1" ~ "Cel1",
+                       ID=="SAMEA6141243"~"Cel2",
+                       ID=="SAMEA6141244"~"Cel3",
+                       ID=="SAMEA6141239"~"Barb1",
+                       ID=="SAMEA6141240"~"Barb2",
+                       ID=="SAMEA6141241"~"Cebi1",
+                       ID=="SAMEA6141242"~"Cebi2",
+                       ID=="SAMEA6141245"~"Ver1",
+                       ID=="SAMEA6141246"~"Ver2",
+                       ID=="ERR173176.1"~"ScrSu1",
+                       ID=="ERR173178.1"~"ScrSu2",
+                       ID=="SAMEA3497823"~"ScrJapan",
+                       ID=="SAMEA3497818"~"ScrChina",
+                       ID=="SAMEA3497880"~"ScrGreece",
+                       .default = ID)
+)
+```
+
+```{r}
+acenstry_ind<-read.table("no_warthog.NoMono.NoMiss.NoHet_LD0.5.fam")
+```
+
+```{r,include=FALSE}
+acenstry_ind <- acenstry_ind %>% mutate(
+  V2 = case_when(V2=="SAMEA3497880" ~ "ScrGreece",
+                       V2=="3" ~ "5_3",
+                       V2=="ERR173210.1" ~ "Cel1",
+                       V2=="SAMEA6141243"~"Cel2",
+                       V2=="SAMEA6141244"~"Cel3",
+                       V2=="SAMEA6141239"~"Barb1",
+                       V2=="SAMEA6141240"~"Barb2",
+                       V2=="SAMEA6141241"~"Cebi1",
+                       V2=="SAMEA6141242"~"Cebi2",
+                       V2=="SAMEA6141245"~"Ver1",
+                       V2=="SAMEA6141246"~"Ver2",
+                       V2=="ERR173176.1"~"ScrSu1",
+                       V2=="ERR173178.1"~"ScrSu2",
+                       V2=="SAMEA3497823"~"ScrJapan",
+                       V2=="SAMEA3497818"~"ScrChina",
+                       V2=="SAMEA3497880"~"ScrGreece",
+                       .default = V2)
+)
+```
+
+```{r}
+ancestry_frac10 <- read.table("no_warthog.NoMono.NoMiss.NoHet_LD0.5.10.Q") %>% cbind(acenstry_ind$V2) %>% rename("ID"="acenstry_ind$V2","cebifrons"="V1","Island celebensis"="V2","Central celebensis"="V3","verrucosus"="V4","Eastern celebensis"="V5","barbatus"="V6","Sumatran scrofa"="V7","Zoo celebensis"="V8","European scrofa"="V9","East Asian scrofa"="V10")
+```
+
+```{r}
+global_metadata_RENAME <- global_metadata %>% mutate(
+  ID = case_when(ID=="SAMEA3497880" ~ "ScrGreece",
+                       ID=="3" ~ "5_3",
+                       ID=="ERR173210.1" ~ "Cel1",
+                       ID=="SAMEA6141243"~"Cel2",
+                       ID=="SAMEA6141244"~"Cel3",
+                       ID=="SAMEA6141239"~"Barb1",
+                       ID=="SAMEA6141240"~"Barb2",
+                       ID=="SAMEA6141241"~"Cebi1",
+                       ID=="SAMEA6141242"~"Cebi2",
+                       ID=="SAMEA6141245"~"Ver1",
+                       ID=="SAMEA6141246"~"Ver2",
+                       ID=="ERR173176.1"~"ScrSu1",
+                       ID=="ERR173178.1"~"ScrSu2",
+                       ID=="SAMEA3497823"~"ScrJapan",
+                       ID=="SAMEA3497818"~"ScrChina",
+                       ID=="SAMEA3497880"~"ScrGreece",
+                       .default = ID)
+)
+```
+
+```{r}
+ancestry_frac10 <- ancestry_frac10 %>% gather(key = "Population", value = "percent", -ID) %>% inner_join(select(global_metadata_RENAME,ID,Name),by="ID")
+
+species_order<- c("Eastern celebensis","Central celebensis","Island celebensis", "Zoo celebensis", "European scrofa","East Asian scrofa","Sumatran scrofa","barbatus","cebifrons","verrucosus")
+
+ancestry_frac10$Population <- factor(ancestry_frac10$Population,level=species_order)
+
+ancestry_frac10<- ancestry_frac10[order(ancestry_frac10$Population),]
+
+cel_order<-c("AL460","5_3","AL456","GL1240","GL1218","GL1221","RB501","55K","333","GL596","AL523","Cel1","Cel2","Cel3",
+             "Barb1","Barb2","Cebi1","Cebi2","ScrChina","ScrJapan","ScrGreece","ScrSu1","ScrSu2","Ver1","Ver2")
+ancestry_frac10$ID <- factor(ancestry_frac10$ID,levels=cel_order)
+
+ancestry_frac10<- ancestry_frac10[order(ancestry_frac10$ID),]
+
+#admix_col <- c("#228833FF","#68cdee","#47c16fFF","#394989FF", "#CCBB44", "#4477AA", "#277F8EFF", "#2298b8", "#EE6677", "#006684")
+
+admix_col <- c("#AA3377","#AA337790","#AA337740", "#EE6677", "#68cdee","#68cdee90","#68cdee30", "#4477AA", "#228833FF","#CCBB44" )
+
+jpeg("FIGURES/AdmixtureK10.jpeg", units="in", width=7.5, height=5.5, res=300)
+ggplot(ancestry_frac10, aes(width = 0.9, fill=Population, y=percent, x=ID)) +
+  geom_bar(position="stack", stat="identity", color="black")+
+  facet_wrap(~Name, scales = "free", nrow = 2)+
+  theme_void()+
+  theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust=1),panel.grid.major = element_blank(), 
+               panel.grid.minor = element_blank())+
+  scale_fill_manual(values=admix_col)
+dev.off()
+```
+To make sure we're seeing the results we think, let's do some replicates for k=5 to k=12.
+```{bash, eval=FALSE}
+#@ Yulong Li
+# run admixture using different seeds and K
+# edited by Joe Williamson
+
+infile=$1
+maxk=$2
+reps=$3
+T=$4
+if [ $# -lt 4 ] || [ $1 = -h ];
+then
+    echo "nameofscript.sh [input bed file] [maximum K] [replicates] [threads]"
+    exit 1
+fi
+
+# run admixture
+for k in `seq 5 $maxk`;
+do 
+    for j in `seq 1 $reps`;   
+    do
+        cur="${infile%".bed"}.run_$j.bed"
+        inbim="${infile%".bed"}.bim"
+		cpbim="${infile%".bed"}.run_$j.bim"
+		infam="${infile%".bed"}.fam"
+		cpfam="${infile%".bed"}.run_$j.fam"
+        cp $infile $cur
+        cp $inbim $cpbim
+        cp $infam $cpfam
+        admixture --cv=5 -j$T -s $RANDOM $cur $k | tee run_$j.$k.log
+        rm $cur
+        rm $cpbim
+        rm $cpfam
+    done
+done
+echo "Done!" 
+```
+
+```{bash,eval=FALSE}
+#!/bin/bash
+#SBATCH --cpus-per-task=28
+#SBATCH --time=72:00:00
+#SBATCH --job-name=admixture_replicates
+#SBATCH --mail-type=ALL
+#SBATCH --mail-user=Hope.Anderson@lmu.de
+#SBATCH --clusters=cm2_tiny
+
+module load slurm_setup
+eval "$(conda shell.bash hook)"
+conda activate AdmixTools
+
+admixture_replicates.sh no_warthog.NoMono.NoMiss.NoHet_LD0.5.bed 12 5 28
+```
+
+## F4
+
+Convert to eigenstrat format
+```{bash, eval=FALSE}
+#eigenstrat.param
+genotypename:    global_NoMiss.NoHet_LD0.5.ped
+snpname:         global_NoMiss.NoHet_LD0.5.map
+indivname:       global_NoMiss.NoHet_LD0.5.ped
+outputformat:    EIGENSTRAT
+genotypeoutname: global_NoMiss.NoHet_LD0.5.geno
+snpoutname:      global_NoMiss.NoHet_LD0.5.snp
+indivoutname:    global_NoMiss.NoHet_LD0.5.ind
+familynames:     NO
+```
+
+```{bash, eval=FALE}
+convertf -p eigenstrat.param
+```
+
+
+#Fix the ind file
+```{bash, eval=FALSE}
+cat global_NoMiss.NoHet_LD0.5.ind | awk 'BEGIN {OFS="\t"};{print $1,"U",$1}' > global_NoMiss.NoHet_LD0.5.ind_new
+rm global_NoMiss.NoHet_LD0.5.ind
+mv global_NoMiss.NoHet_LD0.5.ind_new global_NoMiss.NoHet_LD0.5.ind
+```
+
+```{bash, eval=FALSE}
+#BALI.param
+genotypename:  ../global_NoMiss.NoHet_LD0.5.geno
+snpname:   ../global_NoMiss.NoHet_LD0.5.snp
+indivname:   ../global_NoMiss.NoHet_LD0.5.ind
+popfilename:  BALI.poplist.txt
+blgsize:	0.05
+f4mode: YES
+```
+
+```{bash,eval=FALSE}
+#NORTH.param
+genotypename:  ../global_NoMiss.NoHet_LD0.5.geno
+snpname:   ../global_NoMiss.NoHet_LD0.5.snp
+indivname:   ../global_NoMiss.NoHet_LD0.5.ind
+popfilename:  NORTH.poplist.txt
+blgsize:	0.05
+f4mode: YES
+```
+
+```{bash,eval=FALSE}
+#BALI.poplist.txt
+#sister target source outgroup
+ERR173176.1 AL523 GL1221 SAMEA6141235
+ERR173176.1 AL523 AL456 SAMEA6141235
+SAMEA3497823 AL523 GL1221 SAMEA6141235
+SAMEA3497823 AL523 AL456 SAMEA6141235
+SAMEA3497880 AL523 GL1221 SAMEA6141235
+SAMEA3497880 AL523 AL456 SAMEA6141235
+```
+
+```{bash, eval=FASLE}
+#NORTH.poplist.txt
+#sister target source outgroup
+GL1221 AL460 ERR173176.1 SAMEA6141235
+AL456 AL460 ERR173176.1 SAMEA6141235
+GL1221 AL460 SAMEA3497823 SAMEA6141235
+AL456 AL460 SAMEA3497823 SAMEA6141235
+GL1221 AL460 SAMEA3497880 SAMEA6141235
+AL456 AL460 SAMEA3497880 SAMEA6141235
+```
+
+```{bash, eval=FALSE}
+qpDstat -p BALI.param > BALI.raw_results.txt
+qpDstat -p NORTH.param > NORTH.raw_results.txt
+```
+
+Test the null hypothesis of the tree and whether the sumatran scrofa is mixed with anything else 
+```{bash, eval=FALSE}
+#TREE.param
+genotypename:  ../global_NoMiss.NoHet_LD0.5.geno
+snpname:   ../global_NoMiss.NoHet_LD0.5.snp
+indivname:   ../global_NoMiss.NoHet_LD0.5.ind
+popfilename:  TREE.poplist.txt
+blgsize:	0.05
+f4mode: YES
+```
+
+```{bash,eval=FALSE}
+#SUMATRA_VER.param
+genotypename:  ../global_NoMiss.NoHet_LD0.5.geno
+snpname:   ../global_NoMiss.NoHet_LD0.5.snp
+indivname:   ../global_NoMiss.NoHet_LD0.5.ind
+popfilename:  SUMATRA_VER.poplist.txt
+blgsize:	0.05
+f4mode: YES
+```
+
+```{bash,eval=FALSE}
+#SUMATRA_BAR.param
+genotypename:  ../global_NoMiss.NoHet_LD0.5.geno
+snpname:   ../global_NoMiss.NoHet_LD0.5.snp
+indivname:   ../global_NoMiss.NoHet_LD0.5.ind
+popfilename:  SUMATRA_BAR.poplist.txt
+blgsize:	0.05
+f4mode: YES
+```
+
+```{bash, eval=FALSE}
+#TREE.poplist.txt
+#2 of barb/ceb/ver #scrofa #out
+ERR173210.1 SAMEA6141246 SAMEA3497880 SAMEA6141235
+SAMEA6141240 ERR173210.1 SAMEA3497880 SAMEA6141235
+SAMEA6141240 SAMEA6141246 SAMEA3497880 SAMEA6141235
+SAMEA6141243 SAMEA6141246 SAMEA3497880 SAMEA6141235
+SAMEA6141240 SAMEA6141243 SAMEA3497880 SAMEA6141235
+SAMEA6141240 SAMEA6141246 SAMEA3497880 SAMEA6141235
+ERR173210.1 SAMEA6141246 SAMEA3497823 SAMEA6141235
+SAMEA6141240 ERR173210.1 SAMEA3497823 SAMEA6141235
+SAMEA6141240 SAMEA6141246 SAMEA3497823 SAMEA6141235
+SAMEA6141243 SAMEA6141246 SAMEA3497823 SAMEA6141235
+SAMEA6141240 SAMEA6141243 SAMEA3497823 SAMEA6141235
+SAMEA6141240 SAMEA6141246 SAMEA3497823 SAMEA6141235
+```
+
+```{bash,eval=FALSE}
+#SUMATRA_VER.poplist.txt
+#sister target source outgroup
+SAMEA3497880 ERR173178.1 SAMEA6141245 SAMEA6141235
+SAMEA3497880 ERR173178.1 SAMEA6141246 SAMEA6141235
+SAMEA3497880 ERR173176.1 SAMEA6141245 SAMEA6141235
+SAMEA3497880 ERR173176.1 SAMEA6141246 SAMEA6141235
+```
+
+```{bash, eval=FALSE}
+#SUMATRA_BAR.poplist.txt
+#sister target source outgroup
+SAMEA3497880 ERR173178.1 SAMEA6141240 SAMEA6141235
+SAMEA3497880 ERR173178.1 SAMEA6141239 SAMEA6141235
+SAMEA3497880 ERR173176.1 SAMEA6141240 SAMEA6141235
+SAMEA3497880 ERR173176.1 SAMEA6141239 SAMEA6141235
+```
+
+```{bash,eval=FALSE}
+qpDstat -p TREE.param > TREE.raw_results.txt
+qpDstat -p SUMATRA_VER.param > SUMATRA_VER.raw_results.txt
+qpDstat -p SUMATRA_BAR.param > SUMATRA_BAR.raw_results.txt
+```
+
+```{bash,eval=FALSE}
+grep 'result:' SUMATRA_VER.raw_results.txt | awk 'BEGIN {OFS="\t"};{print $2,$3,$4,$7}' | sort -k4 > SUMATRA_VER.sorted.tsv
+grep 'result:' SUMATRA_BAR.raw_results.txt | awk 'BEGIN {OFS="\t"};{print $2,$3,$4,$7}' | sort -k4 > SUMATRA_BAR.sorted.tsv
+grep 'result:' TREE.raw_results.txt | awk 'BEGIN {OFS="\t"};{print $2,$3,$4,$7}' | sort -k4 > TREE.sorted.tsv
+grep 'result:' BALI.raw_results.txt | awk 'BEGIN {OFS="\t"};{print $2,$3,$4,$7}' | sort -k4 > BALI.sorted.tsv
+grep 'result:' NORTH.raw_results.txt | awk 'BEGIN {OFS="\t"};{print $2,$3,$4,$7}' | sort -k4 > NORTH.sorted.tsv
+```
+
+Lets make the case study plots
+```{r}
+#333 Buton
+
+global_metadata_RENAME$ID <- factor(global_metadata_RENAME$ID)
+
+Buton_case <- global_metadata_RENAME %>% subset(Published == "N" & ID != "AL523") %>% select (ID,Lat,Long) %>% inner_join(square_f3 %>% subset (Pop1 == "333") %>% select (Pop1,Pop2,Z,f3) %>% rename ("ID"="Pop2"), by="ID") %>% rename("lat"= "Lat","long"="Long")
+
+minZ= min(Buton_case$Z)
+maxZ= max(Buton_case$Z)
+
+minf3= min(Buton_case$f3)
+maxf3= max(Buton_case$f3)
+
+Buton_case = Buton_case %>% mutate(Z_scaled = (Z-minZ)/(maxZ-minZ))
+Buton_case = Buton_case %>% mutate(f3_scaled = (f3-minf3)/(maxf3-minf3))
+```
+
+
+```{r}
+reverse_IBS <- triangle_IBS %>% mutate(new_Pop1 = Pop2, new_Pop2 = Pop1) %>% select (new_Pop1,new_Pop2,IBS) %>% rename("Pop1" = "new_Pop1","Pop2" = "new_Pop2")
+square_IBS <- triangle_IBS %>% select (Pop1,Pop2,IBS) %>% rbind(reverse_IBS)
+
+Buton_case <- Buton_case %>% inner_join(square_IBS %>% subset (Pop1 == "333") %>% select (Pop1,Pop2,IBS) %>% rename ("ID"="Pop2"), by="ID") 
+
+minIBS=min(Buton_case$IBS)
+maxIBS=max(Buton_case$IBS)
+
+Buton_case = Buton_case %>% mutate(IBS_scaled = (IBS-minIBS)/(maxIBS-minIBS))
+
+celebensis_metadata = celebensis_metadata %>% mutate(lat_jitter = jitter(Lat,factor=5), long_jitter=jitter(Long,factor=5))
+
+celebensis_metadata_RENAMED <- celebensis_metadata %>% mutate(ID = case_when(ID=="3" ~ "5_3",
+                                                                     .default = ID))
+
+Buton_case <- Buton_case %>% inner_join(celebensis_metadata_RENAMED %>% select(ID,lat_jitter,long_jitter),by="ID")
+```
+
+```{r}
+worldmap <- ne_countries(scale = 'medium', type = 'map_units',
+                         returnclass = 'sf')
+
+Islands_cropped <- st_crop(worldmap, xmax=128, xmin=112,
+                           ymin=-10, ymax=4)
+
+Islands_button <- st_crop(worldmap, xmax=128, xmin=118,
+                           ymin=-10, ymax=4)
+```
+
+Make the Celebensis map:
+```{r}
+
+ region_levels=c("North","CentralNorth","Central","East","SouthEast","Buton","Timor","Bali","unknown")
+celebensis_metadata_RENAMED$Sulawesi_Region <- factor(celebensis_metadata_RENAMED$Sulawesi_Region, levels=region_levels)
+
+jpeg("FIGURES/Sulawesi_CelebensisMAP.jpeg", units="in", width=7.5, height=5.5, res=300)
+ggplot()+
+  geom_sf(data=Islands_cropped)+
+  geom_polygon(fill="lightgray", colour = "white")+
+  geom_point(data=celebensis_metadata_RENAMED, aes(x =long_jitter, y = lat_jitter, group=NULL, color=Sulawesi_Region, shape=Age),size=4)+
+  labs(color="Region")+
+  theme_void()+
+  geom_text_repel(data=celebensis_metadata_RENAMED,aes(x = long_jitter, y = lat_jitter, group=NULL,label=ID),size=3,max.overlaps=50)+
+  scale_color_manual(values=col_vir)
+dev.off()
+
+```
+
+```{r}
+buton_F3 <- ggplot() +
+  geom_sf(data=Islands_button)+
+  geom_polygon(fill="lightgray", colour = "white")+
+  geom_point(data=Buton_case, aes(x = long_jitter, y = lat_jitter, group=NULL, color=f3_scaled),size=4)+
+  labs(color="F3")+
+  theme_void()+
+  geom_text_repel(data=Buton_case,aes(x = long_jitter, y = lat_jitter, group=NULL,label=ID),size=3,max.overlaps=50)+
+  scale_color_viridis(option = "rocket",direction = -1)+
+  geom_point(aes(x=122.9510, y=-4.9254694),
+             size=4,shape="cross")
+
+buton_IBS <- ggplot() +
+  geom_sf(data=Islands_button)+
+  geom_polygon(fill="lightgray", colour = "white")+
+  geom_point(data=Buton_case, aes(x = long_jitter, y = lat_jitter, group=NULL, color=IBS_scaled),size=4)+
+  labs(color="IBS")+
+  theme_void()+
+  geom_text_repel(data=Buton_case,aes(x = long_jitter, y = lat_jitter, group=NULL,label=ID),size=3,max.overlaps=50)+
+  scale_color_viridis(option = "rocket",direction = -1)+
+  geom_point(aes(x=122.9510, y=-4.9254694),
+             size=4,shape="cross")
+```
+
+```{r}
+OnlyCel_NoMiss.NoHet_LD0.5.smartPCA.evec <- OnlyCel_NoMiss.NoHet_LD0.5.smartPCA.evec %>% mutate (BUTON_dist = sqrt((0.1556- PC2)**2 + (0.0034 - PC3)**2))
+
+OnlyCel_NoMiss.NoHet_LD0.5.smartPCA.evec <- OnlyCel_NoMiss.NoHet_LD0.5.smartPCA.evec %>% mutate (TIMOR_dist = sqrt((0.1649- PC2)**2 + (0.0435 - PC3)**2))
+
+Buton_case <- Buton_case %>% inner_join(OnlyCel_NoMiss.NoHet_LD0.5.smartPCA.evec %>% select(ID,BUTON_dist),by="ID")
+
+minPCA = min(Buton_case$BUTON_dist)
+maxPCA = max(Buton_case$BUTON_dist)
+Buton_case = Buton_case %>% mutate(PCA_SCALED = (BUTON_dist-minPCA)/(maxPCA-minPCA))
+```
+
+```{r}
+buton_PCA <- ggplot() +
+  geom_sf(data=Islands_button)+
+  geom_polygon(fill="lightgray", colour = "white")+
+  geom_point(data=Buton_case, aes(x = long_jitter, y = lat_jitter, group=NULL, color=PCA_SCALED),size=4)+
+  labs(color="PCA")+
+  theme_void()+
+  geom_text_repel(data=Buton_case,aes(x = long_jitter, y = lat_jitter, group=NULL,label=ID),size=3,max.overlaps=50)+
+  scale_color_viridis(option = "rocket",direction = 1)+
+  geom_point(aes(x=122.9510, y=-4.9254694),
+             size=4,shape="cross")
+```
+
+```{r}
+jpeg("FIGURES/ButonCase.jpeg", units="in", width=15, height=5.5, res=500)
+ggarrange(buton_F3,buton_IBS, buton_PCA, labels = "auto", nrow = 1, ncol = 3)
+dev.off()
+```
+
+
+```{r}
+Timor_case <- celebensis_metadata_RENAMED %>% subset(Published == "N" & ID != "AL523") %>% select (ID,lat_jitter,long_jitter) %>% inner_join(square_f3 %>% subset (Pop1 == "GL596") %>% select (Pop1,Pop2,f3) %>% rename ("ID"="Pop2"), by="ID") %>% inner_join(square_IBS %>% subset (Pop1 == "GL596")%>% rename("ID"="Pop2"),by="ID") %>% inner_join(OnlyCel_NoMiss.NoHet_LD0.5.smartPCA.evec %>% select(ID,TIMOR_dist),by="ID")
+
+minf3=min(Timor_case$f3)
+maxf3=max(Timor_case$f3)
+minIBS=min(Timor_case$IBS)
+maxIBS=max(Timor_case$IBS)
+minPCA=min(Timor_case$TIMOR_dist)
+maxPCA=max(Timor_case$TIMOR_dist)
+
+Timor_case <- Timor_case %>% mutate(f3_scaled = (f3-minf3)/(maxf3-minf3),
+                                    IBS_scaled = (IBS-minIBS)/(maxIBS-minIBS),
+                                    PCA_scaled = (TIMOR_dist-minPCA)/(maxPCA-minPCA))
+
+```
+
+```{r}
+Timor_F3 <- ggplot() +
+  geom_sf(data=Islands_button)+
+  geom_polygon(fill="lightgray", colour = "white")+
+  geom_point(data=Timor_case, aes(x = long_jitter, y = lat_jitter, group=NULL, color=f3_scaled),size=4)+
+  labs(color="F3")+
+  theme_void()+
+  geom_text_repel(data=Timor_case,aes(x = long_jitter, y = lat_jitter, group=NULL,label=ID),size=3,max.overlaps=50)+
+  scale_color_viridis(option = "rocket",direction = -1)+
+  geom_point(aes(x=125.6783, y= -8.7509510),
+             size=4,shape="cross")
+
+Timor_IBS <- ggplot() +
+  geom_sf(data=Islands_button)+
+  geom_polygon(fill="lightgray", colour = "white")+
+  geom_point(data=Timor_case, aes(x = long_jitter, y = lat_jitter, group=NULL, color=IBS_scaled),size=4)+
+  labs(color="IBS")+
+  theme_void()+
+  geom_text_repel(data=Timor_case,aes(x = long_jitter, y = lat_jitter, group=NULL,label=ID),size=3,max.overlaps=50)+
+  scale_color_viridis(option = "rocket",direction = -1)+
+  geom_point(aes(x=125.6783, y= -8.7509510),
+             size=4,shape="cross")
+
+Timor_PCA <- ggplot() +
+  geom_sf(data=Islands_button)+
+  geom_polygon(fill="lightgray", colour = "white")+
+  geom_point(data=Timor_case, aes(x = long_jitter, y = lat_jitter, group=NULL, color=PCA_scaled),size=4)+
+  labs(color="PCA")+
+  theme_void()+
+  geom_text_repel(data=Timor_case,aes(x = long_jitter, y = lat_jitter, group=NULL,label=ID),size=3,max.overlaps=50)+
+  scale_color_viridis(option = "rocket",direction = 1)+
+  geom_point(aes(x=125.6783, y= -8.7509510),
+             size=4,shape="cross")
+```
+
+```{r}
+jpeg("FIGURES/BOTH_CASE.png", units="in", width=15, height=10, res=800)
+ggarrange(buton_F3, buton_IBS, buton_PCA, Timor_F3,Timor_IBS, Timor_PCA, labels = "auto", nrow = 2, ncol = 3)
+dev.off()
+```
+
+```{r}
+CV_score <- read.csv("Rosie_admixture/full_50_reps/CV_50rep.txt",header=FALSE)
+CV_score <- CV_score %>% separate(V1, into = c("Run","K_extra","error"), sep=":")
+CV_score<-CV_score %>% extract(Run, into = c("Run", "K"), "^([^.]+)\\.(.*)") %>% separate(Run, into = c("Run Extra","Run"), sep="_") %>% extract(K, into = c("K", "log"), "^([^.]+)\\.(.*)") %>% select(Run,K,error)
+
+CV_score$error<-as.numeric(CV_score$error)
+CV_score$K<-factor(CV_score$K,levels=order(as.numeric(CV_score$K)))
+
+jpeg("FIGURES/FINAL/Supp4CVError.png", units="in", width=7.5, height=5.5, res=600)
+ggplot(CV_score, aes(x=K, y=error)) + 
+  geom_violin()+
+  #geom_point(size=.5)+
+  theme_classic()+
+  labs(y="CV error") +
+  stat_summary(fun = "mean",
+               geom = "crossbar", 
+               width = 0.5,
+               colour = "red")
+dev.off()
+
+```
+
+```{r}
+NEW_ancestry_frac10 <- read.table("Rosie_admixture/full_50_reps/no_warthog.NoMono.NoMiss.NoHet_LD0.5.run_5.10.Q") %>% cbind(acenstry_ind$V2)%>%rename("ID"="acenstry_ind$V2")
+
+NEW_ancestry_frac10 <- NEW_ancestry_frac10 %>% rename("Barbatus"="V1","Sumatran scrofa"="V2","Verrucosus"="V3","Southern celebensis"="V4","Cebifrons 1"="V5","Cebifrons 2"="V6","Eurasian scrofa"="V7","Central celebensis"="V8","Northern celebensis"="V9","Zoo celebensis"="V10")
+
+NEW_ancestry_frac10 <- NEW_ancestry_frac10 %>% gather(key = "Population", value = "percent", -ID) %>% inner_join(select(global_metadata_RENAME,ID,Name),by="ID")
+
+cel_order<-c("AL460","5_3","AL456","GL1240","GL1218","GL1221","RB501","55K","333","GL596","AL523","Cel1","Cel2","Cel3","Barb1","Barb2","Cebi1","Cebi2","ScrChina","ScrJapan","ScrGreece","ScrSu1","ScrSu2","Ver1","Ver2")
+NEW_ancestry_frac10$ID <- factor(NEW_ancestry_frac10$ID,levels=cel_order)
+NEW_ancestry_frac10<- NEW_ancestry_frac10[order(NEW_ancestry_frac10$ID),]
+
+species_order <- c("Northern celebensis","Central celebensis","Southern celebensis","Zoo celebensis","Eurasian scrofa","Sumatran scrofa","Barbatus","Cebifrons 1", "Cebifrons 2", "Verrucosus")
+NEW_ancestry_frac10$Population <- factor(NEW_ancestry_frac10$Population,levels=species_order)
+NEW_ancestry_frac10<- NEW_ancestry_frac10[order(NEW_ancestry_frac10$Population),]
+
+admix_col1 <- c("#AA3377","#AA337790","#AA337740", "#EE6677", "#68cdee","#68cdee30","#4477AA", "#228833FF", "#22883350","#CCBB44" )
+
+NEW_ancestry_frac10$Name <- factor(NEW_ancestry_frac10$Name,    # Change factor labels
+                            levels =c("newly sequenced ","Sus barbatus","Sus cebifrons","Sus celebensis","Sus scrofa","Sus verrucosus"),
+                            labels = c("newly~sequenced",
+                                       "italic(Sus~barbatus)",
+                                       "italic(Sus~cebifrons)",
+                                       "italic(Sus~celebensis)",
+                                       "italic(Sus~scrofa)",
+                                       "italic(Sus~verrucosus)"))
+
+
+#jpeg("FIGURES/NEWAdmixtureK10.jpeg", units="in", width=7.5, height=5.5, res=600)
+NEW10 <- ggplot(NEW_ancestry_frac10, aes(width = 0.9, fill=Population, y=percent, x=ID)) +
+  geom_bar(position="stack", stat="identity", color="black")+
+  facet_wrap(~Name, scales = "free", nrow = 2, labeller = label_parsed)+
+  theme_void()+
+  theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust=1),panel.grid.major = element_blank(), 
+               panel.grid.minor = element_blank())+
+  labs(title="K=10, CV error = 0.68575")+
+  scale_fill_manual(values=admix_col1)+
+  theme(plot.title = element_text(hjust = 0.5))
+#dev.off()
+```
+
+
+```{r}
+NEW_ancestry_frac11 <- read.table("Rosie_admixture/full_50_reps/no_warthog.NoMono.NoMiss.NoHet_LD0.5.run_9.11.Q") %>% cbind(acenstry_ind$V2)%>%rename("ID"="acenstry_ind$V2")
+
+NEW_ancestry_frac11 <- NEW_ancestry_frac11 %>% rename("Central north celebensis"="V1","Sumatran scrofa"="V2","Southern/eastern celebensis"="V3","Barbatus"="V4","Verrucosus"="V5","Eurasian scrofa"="V6","Eastern celebensis"="V7","Zoo celebensis"="V8","Northern celebensis"="V9","Chinese scrofa"="V10", "Cebifrons"="V11")
+
+NEW_ancestry_frac11 <- NEW_ancestry_frac11 %>% gather(key = "Population", value = "percent", -ID) %>% inner_join(select(global_metadata_RENAME,ID,Name),by="ID")
+
+NEW_ancestry_frac11$ID <- factor(NEW_ancestry_frac11$ID,levels=cel_order)
+NEW_ancestry_frac11<- NEW_ancestry_frac11[order(NEW_ancestry_frac11$ID),]
+
+species_order <- c("Northern celebensis","Central north celebensis","Eastern celebensis", "Southern/eastern celebensis", "Zoo celebensis","Eurasian scrofa", "Chinese scrofa", "Sumatran scrofa","Barbatus","Cebifrons","Verrucosus")
+NEW_ancestry_frac11$Population <- factor(NEW_ancestry_frac11$Population,levels=species_order)
+NEW_ancestry_frac11<- NEW_ancestry_frac11[order(NEW_ancestry_frac11$Population),]
+
+admix_col2 <- c("#AA3370","#AA337790","#AA337740","#AA337715", "#EE6677", "#68cdee","#68cdee90","#68cdee30", "#4477AA", "#228833FF","#CCBB44")
+
+NEW_ancestry_frac11$Name <- factor(NEW_ancestry_frac11$Name,    # Change factor labels
+                            levels =c("newly sequenced ","Sus barbatus","Sus cebifrons","Sus celebensis","Sus scrofa","Sus verrucosus"),
+                            labels = c("newly~sequenced",
+                                       "italic(Sus~barbatus)",
+                                       "italic(Sus~cebifrons)",
+                                       "italic(Sus~celebensis)",
+                                       "italic(Sus~scrofa)",
+                                       "italic(Sus~verrucosus)"))
+
+#jpeg("FIGURES/NEWAdmixtureK11.jpeg", units="in", width=7.5, height=5.5, res=600)
+NEW11 <- ggplot(NEW_ancestry_frac11, aes(width = 0.9, fill=Population, y=percent, x=ID)) +
+  geom_bar(position="stack", stat="identity", color="black")+
+  facet_wrap(~Name, scales = "free", nrow = 2, labeller = label_parsed)+
+  theme_void()+
+  theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust=1),panel.grid.major = element_blank(), 
+               panel.grid.minor = element_blank())+
+  labs(title="K=11, CV error = 0.65776")+
+  scale_fill_manual(values=admix_col2)+
+  theme(plot.title = element_text(hjust = 0.5))
+
+#dev.off()
+
+```
+
+```{r}
+NEW_ancestry_frac12 <- read.table("Rosie_admixture/full_50_reps/no_warthog.NoMono.NoMiss.NoHet_LD0.5.run_29.12.Q") %>% cbind(acenstry_ind$V2)%>%rename("ID"="acenstry_ind$V2")
+
+NEW_ancestry_frac12 <- NEW_ancestry_frac12 %>% rename("Northern celebensis"="V1","Barbatus"="V2","Buton celebensis"="V3","Sumatran scrofa"="V4","Zoo celebensis"="V5","Central north celebensis"="V6","Bali scrofa"="V7","Eurasian scrofa"="V8","Eastern celebensis"="V9","Verrucosus"="V10", "Cebifrons"="V11", "Sulawesi celebensis"="V12")
+
+NEW_ancestry_frac12 <- NEW_ancestry_frac12 %>% gather(key = "Population", value = "percent", -ID) %>% inner_join(select(global_metadata_RENAME,ID,Name),by="ID")
+
+NEW_ancestry_frac12$ID <- factor(NEW_ancestry_frac12$ID,levels=cel_order)
+NEW_ancestry_frac12<- NEW_ancestry_frac12[order(NEW_ancestry_frac12$ID),]
+
+species_order <- c("Northern celebensis","Central north celebensis","Eastern celebensis", "Sulawesi celebensis","Buton celebensis","Zoo celebensis","Eurasian scrofa", "Sumatran scrofa", "Bali scrofa", "Barbatus","Cebifrons","Verrucosus")
+NEW_ancestry_frac12$Population <- factor(NEW_ancestry_frac12$Population,levels=species_order)
+NEW_ancestry_frac12<- NEW_ancestry_frac12[order(NEW_ancestry_frac12$Population),]
+
+admix_col3 <- c("#AA3370","#AA337790","#AA337740","#AA337715", "#EE667790", "#EE6677",  "#68cdee","#68cdee90","#68cdee30", "#4477AA", "#228833FF","#CCBB44")
+
+NEW_ancestry_frac12$Name <- factor(NEW_ancestry_frac12$Name,    # Change factor labels
+                            levels =c("newly sequenced ","Sus barbatus","Sus cebifrons","Sus celebensis","Sus scrofa","Sus verrucosus"),
+                            labels = c("newly~sequenced",
+                                       "italic(Sus~barbatus)",
+                                       "italic(Sus~cebifrons)",
+                                       "italic(Sus~celebensis)",
+                                       "italic(Sus~scrofa)",
+                                       "italic(Sus~verrucosus)"))
+
+#jpeg("FIGURES/NEWAdmixtureK12.jpeg", units="in", width=7.5, height=5.5, res=600)
+NEW12 <- ggplot(NEW_ancestry_frac12, aes(width = 0.9, fill=Population, y=percent, x=ID)) +
+  geom_bar(position="stack", stat="identity", color="black")+
+  facet_wrap(~Name, scales = "free", nrow = 2, labeller = label_parsed)+
+  theme_void()+
+  theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust=1),panel.grid.major = element_blank(), 
+               panel.grid.minor = element_blank())+
+  labs(title="K=12, CV error = 0.45449")+
+  scale_fill_manual(values=admix_col3)+
+  theme(plot.title = element_text(hjust = 0.5))
+#dev.off()
+```
+
+```{r}
+jpeg("FIGURES/FINAL/MainAdmixture.png", units="in", width=16, height=9, res=600)
+ggarrange(NEW10,NEW11,NEW12, ncol = 2, nrow = 2, labels=NULL)
+dev.off()
+```
+
